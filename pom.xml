@@ -18,6 +18,7 @@
 
     <artifactId>log-weaver</artifactId>
     <version>0.1-SNAPSHOT</version>
+    <packaging>maven-plugin</packaging>
 
     <name>Logging Weaver</name>
     <description>
