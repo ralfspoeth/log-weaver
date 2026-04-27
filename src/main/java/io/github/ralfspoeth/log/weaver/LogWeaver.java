@@ -29,6 +29,10 @@ import static java.util.function.Predicate.not;
 public class LogWeaver extends AbstractMojo {
 
     @Parameter(defaultValue = "${project.build.outputDirectory}", readonly = true)
+    public void setClassesDir(Path classesDir) {
+        this.classesDir = classesDir;
+    }
+
     private Path classesDir;
 
 
