@@ -31,11 +31,6 @@ public class LogWeaver extends AbstractMojo {
     @Parameter(defaultValue = "${project.build.outputDirectory}", readonly = true)
     private Path classesDir;
 
-    /**
-     * Vollqualifizierter Name der Log-Annotation. Konfigurierbar.
-     */
-    @Parameter(defaultValue = "com.example.annotations.Log")
-    private String logAnnotation;
 
     // ── Konstanten ───────────────────────────────────────────────────────────
     private static final ClassDesc LOGGER_CD = ClassDesc.of("java.lang.System$Logger");
@@ -45,6 +40,7 @@ public class LogWeaver extends AbstractMojo {
     private static final ClassDesc OBJECT_ARR = OBJECT_CD.arrayType();
     private static final ClassDesc SYSTEM_CD = ClassDesc.of("java.lang.System");
     private static final ClassDesc SUPPLIER_CD = ClassDesc.of("java.util.function.Supplier");
+    private static final ClassDesc LOG_CD = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
 
     private static final DirectMethodHandleDesc LMF_BOOTSTRAP =
             MethodHandleDesc.ofMethod(
@@ -61,10 +57,6 @@ public class LogWeaver extends AbstractMojo {
                                     + ")Ljava/lang/invoke/CallSite;"
                     )
             );
-
-    private ClassDesc logAnnotationDesc() {
-        return ClassDesc.of(logAnnotation);
-    }
 
     // ── execute ──────────────────────────────────────────────────────────────
     @Override
@@ -240,19 +232,17 @@ public class LogWeaver extends AbstractMojo {
 
     // ── Annotation lesen ─────────────────────────────────────────────────────
     private boolean hasLogAnnotation(MethodModel m) {
-        ClassDesc target = logAnnotationDesc();
         return m.findAttribute(Attributes.runtimeVisibleAnnotations())
                 .map(attr -> attr.annotations().stream()
-                        .anyMatch(a -> a.classSymbol().equals(target)))
+                        .anyMatch(a -> a.classSymbol().equals(LOG_CD)))
                 .orElse(false);
     }
 
     private Optional<LogInfo> readLogAnnotation(CodeModel code) {
-        ClassDesc target = logAnnotationDesc();
         return code.parent()
                 .flatMap(m -> m.findAttribute(Attributes.runtimeVisibleAnnotations()))
                 .flatMap(attr -> attr.annotations().stream()
-                        .filter(a -> a.classSymbol().equals(target))
+                        .filter(a -> a.classSymbol().equals(LOG_CD))
                         .findFirst())
                 .map(LogWeaver::extractLogInfo);
     }
