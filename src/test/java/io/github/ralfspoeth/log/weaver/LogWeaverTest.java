@@ -21,11 +21,11 @@ import static java.lang.constant.ConstantDescs.CD_void;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Tests für {@link LogWeaver}.
+ * Tests for {@link LogWeaver}.
  *
- * <p>Statt eine Java-Klasse als Fixture zu kompilieren, erzeugt jeder Test
- * seine Eingabe direkt über die {@code java.lang.classfile}-API. So bleibt
- * der Test in sich abgeschlossen und unabhängig von log-api zur Compile-Zeit.
+ * <p>Rather than compile a Java class as a fixture, each test builds its
+ * input directly through the {@code java.lang.classfile} API. The test
+ * stays self-contained and compile-time-independent of log-api.
  */
 class LogWeaverTest {
 
@@ -50,45 +50,45 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // 1) Synthetische Helfer-Methode wurde hinzugefügt
+        // 1) The synthetic helper method was added
         MethodModel synthetic = findMethod(cm, "lambda$logweaver$greet");
         assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
                 synthetic.methodType().stringValue(),
-                "Helfer muss (String)String sein");
-        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "Helfer muss static sein");
-        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "Helfer muss private sein");
-        assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "Helfer muss synthetic sein");
+                "helper must be (String)String");
+        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "helper must be static");
+        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "helper must be private");
+        assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "helper must be synthetic");
 
-        // 2) Original-Methode wurde mit Logging-Prolog präfixiert
+        // 2) The original method was prefixed with the logging prologue
         List<String> ops = opcodes(findMethod(cm, "greet"));
         assertTrue(ops.contains("INVOKESTATIC"),
-                "Prolog muss System.getLogger rufen");
+                "prologue must call System.getLogger");
         assertTrue(ops.contains("GETSTATIC"),
-                "Prolog muss Level-Konstante laden");
+                "prologue must load the level constant");
         assertTrue(ops.contains("INVOKEDYNAMIC"),
-                "Prolog muss Supplier via invokedynamic erzeugen");
+                "prologue must build the Supplier via invokedynamic");
         assertTrue(ops.contains("INVOKEINTERFACE"),
-                "Prolog muss Logger.log aufrufen");
+                "prologue must call Logger.log");
 
-        // 3) Reihenfolge: indy ist Teil des Prologs, also vor dem RETURN
+        // 3) Order: indy is part of the prologue, hence before RETURN
         int indyIdx = ops.indexOf("INVOKEDYNAMIC");
         int retIdx = ops.lastIndexOf("RETURN");
         assertTrue(indyIdx >= 0 && retIdx > indyIdx,
-                "Logging-Prolog muss vor dem Originalcode liegen");
+                "logging prologue must precede the original code");
     }
 
     @Test
     void leavesUnannotatedClassUntouched(@TempDir Path tempDir) throws Exception {
         ClassDesc barCd = ClassDesc.of("com.example.Bar");
         Path classFile = writeFixture(tempDir, barCd,
-                "doNothing", MethodTypeDesc.of(CD_void), /* keine @Log */ null);
+                "doNothing", MethodTypeDesc.of(CD_void), /* no @Log */ null);
 
         byte[] before = Files.readAllBytes(classFile);
         runWeaver(tempDir);
         byte[] after = Files.readAllBytes(classFile);
 
         assertArrayEquals(before, after,
-                "Klasse ohne @Log darf bytes-identisch bleiben");
+                "a class without @Log must remain bytes-identical");
     }
 
     @Test
@@ -106,17 +106,17 @@ class LogWeaverTest {
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
         MethodModel synthetic = findMethod(cm, "lambda$logweaver$count");
 
-        // int wurde zu Integer geboxt
+        // int got boxed to Integer
         assertEquals("(Ljava/lang/Integer;)Ljava/lang/String;",
                 synthetic.methodType().stringValue(),
-                "Primitive Parameter müssen in der Helfer-Methode geboxt sein");
+                "primitive parameters must be boxed in the helper method");
 
-        // Aufrufer ruft Integer.valueOf(int) vor invokedynamic auf
+        // The caller invokes Integer.valueOf(int) before invokedynamic
         List<String> ops = opcodes(findMethod(cm, "count"));
         assertTrue(ops.contains("INVOKESTATIC"),
-                "Boxing-Aufruf Integer.valueOf muss vorhanden sein");
+                "the Integer.valueOf boxing call must be present");
         assertTrue(ops.contains("INVOKEDYNAMIC"),
-                "Supplier-Erzeugung muss vorhanden sein");
+                "the Supplier creation must be present");
     }
 
     @Test
@@ -133,40 +133,40 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // Helfer-Methode: int wird zu Integer geboxt, String bleibt String,
-        // Rückgabetyp ist die formatierte Nachricht (String).
+        // Helper method: int gets boxed to Integer, String stays String,
+        // return type is the formatted message (String).
         MethodModel synthetic = findMethod(cm, "lambda$logweaver$hello");
         assertEquals("(Ljava/lang/Integer;Ljava/lang/String;)Ljava/lang/String;",
                 synthetic.methodType().stringValue(),
-                "Helfer muss (Integer, String) -> String sein");
-        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "Helfer muss static sein");
-        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "Helfer muss private sein");
-        assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "Helfer muss synthetic sein");
+                "helper must be (Integer, String) -> String");
+        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "helper must be static");
+        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "helper must be private");
+        assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "helper must be synthetic");
 
-        // Prolog der Original-Methode
+        // Original method's prologue
         List<String> ops = opcodes(findMethod(cm, "hello"));
         assertTrue(ops.contains("INVOKESTATIC"),
-                "Prolog muss System.getLogger und Integer.valueOf rufen");
+                "prologue must call System.getLogger and Integer.valueOf");
         assertTrue(ops.contains("GETSTATIC"),
-                "Prolog muss Level-Konstante laden (Default INFO)");
+                "prologue must load the level constant (default INFO)");
         assertTrue(ops.contains("INVOKEDYNAMIC"),
-                "Prolog muss Supplier via invokedynamic erzeugen");
+                "prologue must build the Supplier via invokedynamic");
         assertTrue(ops.contains("INVOKEINTERFACE"),
-                "Prolog muss Logger.log aufrufen");
+                "prologue must call Logger.log");
 
-        // Zwei INVOKESTATIC-Aufrufe erwartet:
+        // Two INVOKESTATIC calls expected:
         //  - System.getLogger(String)
         //  - Integer.valueOf(int)
         long invokeStaticCount = ops.stream().filter("INVOKESTATIC"::equals).count();
         assertTrue(invokeStaticCount >= 2,
-                "Erwartet mindestens System.getLogger und Integer.valueOf, war: " + invokeStaticCount);
+                "expected at least System.getLogger and Integer.valueOf, was: " + invokeStaticCount);
 
-        // Reihenfolge: getLogger -> getstatic Level -> aload(int) -> Integer.valueOf
+        // Order: getLogger -> getstatic Level -> aload(int) -> Integer.valueOf
         // -> aload(String) -> invokedynamic -> Logger.log -> RETURN
         int indyIdx = ops.indexOf("INVOKEDYNAMIC");
         int retIdx = ops.lastIndexOf("RETURN");
         assertTrue(indyIdx >= 0 && retIdx > indyIdx,
-                "Logging-Prolog muss vor dem Originalcode liegen");
+                "logging prologue must precede the original code");
 
         try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
             var mineClass = cl.loadClass("Mine");
@@ -176,7 +176,7 @@ class LogWeaverTest {
         }
     }
 
-    // ── Hilfsfunktionen ──────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static Path writeFixture(Path baseDir,
                                      ClassDesc thisClass,
@@ -195,7 +195,7 @@ class LogWeaverTest {
                         cb.return_();
                     });
 
-            // public void <methodName>(<params>) { /* ggf. mit @Log */ }
+            // public void <methodName>(<params>) { /* optionally with @Log */ }
             clb.withMethod(methodName, methodType, ClassFile.ACC_PUBLIC, mb -> {
                 if (logAnnotation != null) {
                     mb.with(RuntimeVisibleAnnotationsAttribute.of(logAnnotation));
@@ -204,7 +204,7 @@ class LogWeaverTest {
             });
         });
 
-        // Pfad ableiten aus internem Klassennamen, z.B. "com/example/Foo"
+        // Derive path from the internal class name, e.g. "com/example/Foo"
         String internal = thisClass.descriptorString();
         internal = internal.substring(1, internal.length() - 1); // L...; -> ...
         Path classFile = baseDir.resolve(internal + ".class");
@@ -223,7 +223,7 @@ class LogWeaverTest {
         return cm.methods().stream()
                 .filter(m -> m.methodName().stringValue().equals(name))
                 .findFirst()
-                .orElseThrow(() -> new AssertionError("Methode nicht gefunden: " + name));
+                .orElseThrow(() -> new AssertionError("method not found: " + name));
     }
 
     private static List<String> opcodes(MethodModel mm) {
