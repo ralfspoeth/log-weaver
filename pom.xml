@@ -16,7 +16,7 @@
     </parent>
 
     <artifactId>log-weaver</artifactId>
-    <version>0.2-SNAPSHOT</version>
+    <version>0.2</version>
     <packaging>maven-plugin</packaging>
 
     <name>Logging Weaver</name>
@@ -32,7 +32,7 @@
     <scm>
         <url>scm:git:https://github.com/ralfspoeth/log-weaver</url>
         <developerConnection>scm:git:https://github.com/ralfspoeth/log-weaver.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>log-weaver-0.2</tag>
     </scm>
     <build>
         <plugins>
