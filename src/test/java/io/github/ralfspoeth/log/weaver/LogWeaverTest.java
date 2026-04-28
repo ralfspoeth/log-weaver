@@ -9,6 +9,8 @@ import java.lang.classfile.attribute.RuntimeVisibleAnnotationsAttribute;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.reflect.AccessFlag;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -16,9 +18,7 @@ import java.util.List;
 
 import static java.lang.constant.ConstantDescs.CD_int;
 import static java.lang.constant.ConstantDescs.CD_void;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests für {@link LogWeaver}.
@@ -31,8 +31,8 @@ class LogWeaverTest {
 
     private static final ClassDesc OBJECT_CD = ClassDesc.of("java.lang.Object");
     private static final ClassDesc STRING_CD = ClassDesc.of("java.lang.String");
-    private static final ClassDesc LOG_CD    = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
-    private static final ClassDesc LEVEL_CD  = ClassDesc.of("java.lang.System$Logger$Level");
+    private static final ClassDesc LOG_CD = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
+    private static final ClassDesc LEVEL_CD = ClassDesc.of("java.lang.System$Logger$Level");
 
     // ── Tests ────────────────────────────────────────────────────────────────
 
@@ -55,8 +55,8 @@ class LogWeaverTest {
         assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
                 synthetic.methodType().stringValue(),
                 "Helfer muss (String)String sein");
-        assertTrue(synthetic.flags().has(AccessFlag.STATIC),    "Helfer muss static sein");
-        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE),   "Helfer muss private sein");
+        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "Helfer muss static sein");
+        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "Helfer muss private sein");
         assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "Helfer muss synthetic sein");
 
         // 2) Original-Methode wurde mit Logging-Prolog präfixiert
@@ -72,7 +72,7 @@ class LogWeaverTest {
 
         // 3) Reihenfolge: indy ist Teil des Prologs, also vor dem RETURN
         int indyIdx = ops.indexOf("INVOKEDYNAMIC");
-        int retIdx  = ops.lastIndexOf("RETURN");
+        int retIdx = ops.lastIndexOf("RETURN");
         assertTrue(indyIdx >= 0 && retIdx > indyIdx,
                 "Logging-Prolog muss vor dem Originalcode liegen");
     }
@@ -85,7 +85,7 @@ class LogWeaverTest {
 
         byte[] before = Files.readAllBytes(classFile);
         runWeaver(tempDir);
-        byte[] after  = Files.readAllBytes(classFile);
+        byte[] after = Files.readAllBytes(classFile);
 
         assertArrayEquals(before, after,
                 "Klasse ohne @Log darf bytes-identisch bleiben");
@@ -119,6 +119,63 @@ class LogWeaverTest {
                 "Supplier-Erzeugung muss vorhanden sein");
     }
 
+    @Test
+    void weavesMineHelloWithMixedParameters(@TempDir Path tempDir) throws Exception {
+        // class Mine { @Log("int %d String %s") void hello(int a, String b) {} }
+        ClassDesc mineCd = ClassDesc.of("Mine");
+        Annotation logAnn = Annotation.of(LOG_CD,
+                AnnotationElement.ofString("value", "int %d String %s"));
+
+        Path classFile = writeFixture(tempDir, mineCd,
+                "hello", MethodTypeDesc.of(CD_void, CD_int, STRING_CD), logAnn);
+
+        runWeaver(tempDir);
+
+        ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
+
+        // Helfer-Methode: int wird zu Integer geboxt, String bleibt String,
+        // Rückgabetyp ist die formatierte Nachricht (String).
+        MethodModel synthetic = findMethod(cm, "lambda$logweaver$hello");
+        assertEquals("(Ljava/lang/Integer;Ljava/lang/String;)Ljava/lang/String;",
+                synthetic.methodType().stringValue(),
+                "Helfer muss (Integer, String) -> String sein");
+        assertTrue(synthetic.flags().has(AccessFlag.STATIC), "Helfer muss static sein");
+        assertTrue(synthetic.flags().has(AccessFlag.PRIVATE), "Helfer muss private sein");
+        assertTrue(synthetic.flags().has(AccessFlag.SYNTHETIC), "Helfer muss synthetic sein");
+
+        // Prolog der Original-Methode
+        List<String> ops = opcodes(findMethod(cm, "hello"));
+        assertTrue(ops.contains("INVOKESTATIC"),
+                "Prolog muss System.getLogger und Integer.valueOf rufen");
+        assertTrue(ops.contains("GETSTATIC"),
+                "Prolog muss Level-Konstante laden (Default INFO)");
+        assertTrue(ops.contains("INVOKEDYNAMIC"),
+                "Prolog muss Supplier via invokedynamic erzeugen");
+        assertTrue(ops.contains("INVOKEINTERFACE"),
+                "Prolog muss Logger.log aufrufen");
+
+        // Zwei INVOKESTATIC-Aufrufe erwartet:
+        //  - System.getLogger(String)
+        //  - Integer.valueOf(int)
+        long invokeStaticCount = ops.stream().filter("INVOKESTATIC"::equals).count();
+        assertTrue(invokeStaticCount >= 2,
+                "Erwartet mindestens System.getLogger und Integer.valueOf, war: " + invokeStaticCount);
+
+        // Reihenfolge: getLogger -> getstatic Level -> aload(int) -> Integer.valueOf
+        // -> aload(String) -> invokedynamic -> Logger.log -> RETURN
+        int indyIdx = ops.indexOf("INVOKEDYNAMIC");
+        int retIdx = ops.lastIndexOf("RETURN");
+        assertTrue(indyIdx >= 0 && retIdx > indyIdx,
+                "Logging-Prolog muss vor dem Originalcode liegen");
+
+        try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
+            var mineClass = cl.loadClass("Mine");
+            var helloMethod = mineClass.getMethod("hello", int.class, String.class);
+            var mine = mineClass.getDeclaredConstructor().newInstance();
+            helloMethod.invoke(mine, 2, "Two");
+        }
+    }
+
     // ── Hilfsfunktionen ──────────────────────────────────────────────────────
 
     private static Path writeFixture(Path baseDir,
@@ -133,10 +190,10 @@ class LogWeaverTest {
             // public <init>() { super(); }
             clb.withMethodBody("<init>", MethodTypeDesc.of(CD_void),
                     ClassFile.ACC_PUBLIC, cb -> {
-                cb.aload(0);
-                cb.invokespecial(OBJECT_CD, "<init>", MethodTypeDesc.of(CD_void));
-                cb.return_();
-            });
+                        cb.aload(0);
+                        cb.invokespecial(OBJECT_CD, "<init>", MethodTypeDesc.of(CD_void));
+                        cb.return_();
+                    });
 
             // public void <methodName>(<params>) { /* ggf. mit @Log */ }
             clb.withMethod(methodName, methodType, ClassFile.ACC_PUBLIC, mb -> {
