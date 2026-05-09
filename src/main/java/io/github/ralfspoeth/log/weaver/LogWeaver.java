@@ -194,7 +194,7 @@ public class LogWeaver extends AbstractMojo {
                         }
                     });
                 } else if (notYetWoven.test(mm)) {
-                    resolveLogInfo(owner, mm, effectiveAll).ifPresentOrElse(info -> weaveMethod(clb, mm, info, owner), () -> clb.with(mm));
+                    resolveLogInfo(mm, effectiveAll).ifPresentOrElse(info -> weaveMethod(clb, mm, info, owner), () -> clb.with(mm));
                 } else {
                     // Already-woven method: pass through untouched.
                     clb.with(mm);
@@ -226,7 +226,7 @@ public class LogWeaver extends AbstractMojo {
      * The entry-log message is always synthesized as
      * {@code <SimpleClass>.<method>(%s, …)} – the same policy as {@code @LogAll}.
      */
-    private Optional<LogInfo> resolveLogInfo(ClassDesc owner, MethodModel mm, Optional<LogAllConfig> effectiveAll) {
+    private Optional<LogInfo> resolveLogInfo(MethodModel mm, Optional<LogAllConfig> effectiveAll) {
         Optional<LogInfo> methodLog = readLogAnnotation(mm);
         if (methodLog.isPresent()) return methodLog;
 
@@ -292,7 +292,6 @@ public class LogWeaver extends AbstractMojo {
         // with any local already used by the body.
         int origMaxLocals = mm.findAttribute(Attributes.code()).map(CodeAttribute::maxLocals).orElse(0);
         int resultSlots = (logReturn && !isVoid) ? slotWidth(returnType) : 0;
-        int resultSlot = origMaxLocals;
         int throwableSlot = origMaxLocals + resultSlots;
 
         // Captures used by both the closures below.
@@ -326,7 +325,7 @@ public class LogWeaver extends AbstractMojo {
                         if (logReturn && element instanceof ReturnInstruction) {
                             // Return log re-uses the entry-log level.
                             emitReturnLog(cb, owner, info.levelName(), params,
-                                    returnType, isVoid, resultSlot, returnIndyFinal);
+                                    returnType, isVoid, origMaxLocals, returnIndyFinal);
                         }
                         cb.with(element);
                     });
