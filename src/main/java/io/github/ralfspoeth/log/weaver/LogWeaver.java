@@ -9,13 +9,18 @@ import org.apache.maven.plugins.annotations.ResolutionScope;
 
 import java.io.IOException;
 import java.lang.classfile.*;
+import java.lang.classfile.attribute.CodeAttribute;
+import java.lang.classfile.attribute.RuntimeVisibleAnnotationsAttribute;
+import java.lang.classfile.instruction.ReturnInstruction;
 import java.lang.constant.*;
 import java.lang.reflect.AccessFlag;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static java.lang.constant.ConstantDescs.*;
 import static java.util.function.Predicate.not;
@@ -24,12 +29,14 @@ import static java.util.function.Predicate.not;
 public class LogWeaver extends AbstractMojo {
 
     @Parameter(defaultValue = "${project.build.outputDirectory}", readonly = true)
+    private Path classesDir;
+
+    /**
+     * Test-only setter — Maven injects {@link #classesDir} directly into the field.
+     */
     public void setClassesDir(Path classesDir) {
         this.classesDir = classesDir;
     }
-
-    private Path classesDir;
-
 
     // ── Constants ────────────────────────────────────────────────────────────
     // CD_String, CD_Object, CD_Boolean etc. come from ConstantDescs (static import).
@@ -38,10 +45,36 @@ public class LogWeaver extends AbstractMojo {
     private static final ClassDesc CD_System = ClassDesc.of("java.lang.System");
     private static final ClassDesc CD_Supplier = ClassDesc.of("java.util.function.Supplier");
     private static final ClassDesc CD_ObjectArray = CD_Object.arrayType();
+    private static final ClassDesc CD_Throwable = ClassDesc.of("java.lang.Throwable");
     private static final ClassDesc CD_Log = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
     private static final ClassDesc CD_LogAll = ClassDesc.of("io.github.ralfspoeth.log.api.LogAll");
 
-    private static final DirectMethodHandleDesc LMF_BOOTSTRAP = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC, ClassDesc.of("java.lang.invoke.LambdaMetafactory"), "metafactory", MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodHandles$Lookup;" + "Ljava/lang/String;" + "Ljava/lang/invoke/MethodType;" + "Ljava/lang/invoke/MethodType;" + "Ljava/lang/invoke/MethodHandle;" + "Ljava/lang/invoke/MethodType;" + ")Ljava/lang/invoke/CallSite;"));
+    /**
+     * Sentinel level meaning "exception logging is disabled". Stored as the
+     * string {@code "OFF"} since {@link System.Logger.Level} can never be
+     * {@code null} in an annotation declaration; users default
+     * {@code exceptionLevel} to {@link System.Logger.Level#OFF}.
+     */
+    private static final String OFF = "OFF";
+
+    /**
+     * Synthetic per-class field that holds the {@link System.Logger} instance.
+     */
+    static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
+
+    private static final DirectMethodHandleDesc LMF_BOOTSTRAP = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC,
+            ClassDesc.of("java.lang.invoke.LambdaMetafactory"),
+            "metafactory",
+            MethodTypeDesc.ofDescriptor("""
+                    (Ljava/lang/invoke/MethodHandles$Lookup;\
+                    Ljava/lang/String;\
+                    Ljava/lang/invoke/MethodType;\
+                    Ljava/lang/invoke/MethodType;\
+                    Ljava/lang/invoke/MethodHandle;\
+                    Ljava/lang/invoke/MethodType;\
+                    )Ljava/lang/invoke/CallSite;"""
+            )
+    );
 
     // ── execute ──────────────────────────────────────────────────────────────
     @Override
@@ -111,17 +144,61 @@ public class LogWeaver extends AbstractMojo {
         // Resolve the effective @LogAll for this class: type > package > module.
         Optional<LogAllConfig> effectiveAll = readLogAllConfig(cm).or(() -> Optional.ofNullable(scopes.byPackage().get(owner.packageName()))).or(scopes::module);
 
-        boolean anyLog = cm.methods().stream().anyMatch(this::hasLogAnnotation);
-        boolean anyLogAll = effectiveAll.isPresent() && cm.methods().stream().anyMatch(effectiveAll.get()::matches);
+        // A method counts as "already woven" iff its synthetic helper is
+        // present. The helper name is deterministic per (method name,
+        // descriptor), so a re-run on already-woven bytecode safely skips it.
+        Set<String> existingMethodNames = cm.methods().stream().map(m -> m.methodName().stringValue()).collect(Collectors.toUnmodifiableSet());
+        Predicate<MethodModel> notYetWoven = mm -> !existingMethodNames.contains(syntheticName(mm));
+
+        boolean anyLog = cm.methods().stream().filter(notYetWoven).anyMatch(this::hasLogAnnotation);
+        boolean anyLogAll = effectiveAll.isPresent() && cm.methods().stream().filter(notYetWoven).anyMatch(effectiveAll.get()::matches);
 
         if (!anyLog && !anyLogAll) return original;
 
-        // Inline ClassTransform: pass through every class element except woven
-        // methods – those are rewritten AND a synthetic format method is
-        // immediately emitted into the same builder.
+        boolean hasClinit = cm.methods().stream().anyMatch(m -> m.methodName().stringValue().equals("<clinit>"));
+        boolean hasLoggerField = cm.fields().stream().anyMatch(f -> f.fieldName().stringValue().equals(LOGGER_FIELD_NAME));
+        String loggerName = (owner.packageName().isEmpty() ? "" : owner.packageName() + ".") + owner.displayName();
+
+        // ClassBuilder additions outside of an existing element's iteration are
+        // legal at any time, but we only want to perform them once. The flag
+        // ensures that – it fires on the very first element visited.
+        boolean[] firstCall = {true};
+
         return cf.transformClass(cm, (clb, element) -> {
+            if (firstCall[0]) {
+                firstCall[0] = false;
+                if (!hasLoggerField) {
+                    clb.withField(LOGGER_FIELD_NAME, CD_Logger, ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_FINAL | ClassFile.ACC_SYNTHETIC);
+                }
+                if (!hasClinit) {
+                    // Class has no <clinit> yet – add one that just initializes LOGGER.
+                    clb.withMethod("<clinit>", MethodTypeDesc.of(CD_void), ClassFile.ACC_STATIC, mb -> mb.withCode(cb -> {
+                        emitLoggerInit(cb, owner, loggerName);
+                        cb.return_();
+                    }));
+                }
+            }
+
             if (element instanceof MethodModel mm) {
-                resolveLogInfo(owner, mm, effectiveAll).ifPresentOrElse(info -> weaveMethod(clb, mm, info, owner), () -> clb.with(mm));
+                String name = mm.methodName().stringValue();
+                if (name.equals("<clinit>")) {
+                    // Existing <clinit>: prepend LOGGER initialization to its body.
+                    clb.transformMethod(mm, (mb, mElement) -> {
+                        if (mElement instanceof CodeModel code) {
+                            mb.withCode(cb -> {
+                                emitLoggerInit(cb, owner, loggerName);
+                                code.forEach(cb);
+                            });
+                        } else {
+                            mb.with(mElement);
+                        }
+                    });
+                } else if (notYetWoven.test(mm)) {
+                    resolveLogInfo(owner, mm, effectiveAll).ifPresentOrElse(info -> weaveMethod(clb, mm, info, owner), () -> clb.with(mm));
+                } else {
+                    // Already-woven method: pass through untouched.
+                    clb.with(mm);
+                }
             } else {
                 clb.with(element);
             }
@@ -129,91 +206,243 @@ public class LogWeaver extends AbstractMojo {
     }
 
     /**
+     * Emits {@code LOGGER = System.getLogger(<loggerName>);} into the given code builder.
+     */
+    private static void emitLoggerInit(CodeBuilder cb, ClassDesc owner, String loggerName) {
+        cb.ldc(loggerName);
+        cb.invokestatic(CD_System, "getLogger", MethodTypeDesc.of(CD_Logger, CD_String));
+        cb.putstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
+    }
+
+    /**
      * Determines the effective {@link LogInfo} for a method by the
      * "most-specific wins" rule:
      * <ol>
      *     <li>Method-level {@code @Log} beats everything.</li>
-     *     <li>Empty {@code value()} → the message is synthesized
-     *         ({@code <SimpleClass>.<method>(%s, …)}).</li>
      *     <li>Otherwise the effective {@code @LogAll} (type → package → module)
-     *         applies, if it matches the method; the message is synthesized as well.</li>
+     *         applies, if it matches the method.</li>
      *     <li>Otherwise no weaving.</li>
      * </ol>
+     * The entry-log message is always synthesized as
+     * {@code <SimpleClass>.<method>(%s, …)} – the same policy as {@code @LogAll}.
      */
     private Optional<LogInfo> resolveLogInfo(ClassDesc owner, MethodModel mm, Optional<LogAllConfig> effectiveAll) {
-        Optional<LogInfo> methodLog = readLogAnnotation(mm).map(info -> info.message().isEmpty() ? new LogInfo(synthesizeMessage(owner, mm), info.levelName()) : info);
+        Optional<LogInfo> methodLog = readLogAnnotation(mm);
         if (methodLog.isPresent()) return methodLog;
 
         if (effectiveAll.isPresent() && effectiveAll.get().matches(mm)) {
-            return Optional.of(new LogInfo(synthesizeMessage(owner, mm), effectiveAll.get().levelName()));
+            // @LogAll only drives the entry log – it does not enable
+            // return/exception logging (those are method-level decisions).
+            return Optional.of(new LogInfo(effectiveAll.get().levelName(), false, OFF));
         }
         return Optional.empty();
     }
 
     /**
-     * Rewrites the annotated method (with logging prologue) and appends the
-     * synthetic format helper method directly to the class.
+     * Rewrites the annotated method with:
+     * <ol>
+     *   <li>An entry log prologue (lazy {@link java.util.function.Supplier} via
+     *       {@code invokedynamic}) using the {@code level()} of the {@code @Log}
+     *       annotation.</li>
+     *   <li>If {@code logReturn() == true}: a return log (at the same level as
+     *       the entry log) emitted before each {@link ReturnInstruction},
+     *       capturing the parameters and (for non-void methods) the return
+     *       value.</li>
+     *   <li>If {@code exceptionLevel != OFF}: a {@link Throwable} catch around
+     *       the body that calls
+     *       {@code logger.log(exceptionLevel, t.getMessage(), t)} and
+     *       re-throws.</li>
+     * </ol>
+     * The {@code @Log} annotation is stripped after weaving so a second pass is
+     * a no-op.
      */
     private void weaveMethod(ClassBuilder clb, MethodModel mm, LogInfo info, ClassDesc owner) {
         boolean isStatic = mm.flags().has(AccessFlag.STATIC);
         List<ParamSlot> params = ParamSlot.of(mm, isStatic);
         List<ClassDesc> implParams = params.stream().map(p -> p.isPrimitive() ? p.boxed() : p.type()).toList();
-        String implName = "lambda$logweaver$" + mm.methodName().stringValue();
-        MethodTypeDesc implType = MethodTypeDesc.of(CD_String, implParams);
 
-        DirectMethodHandleDesc implHandle = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC, owner, implName, implType);
+        // Entry helper: (boxedP1, boxedP2, ...) -> String
+        String entryHelperName = syntheticName(mm);
+        MethodTypeDesc entryHelperType = MethodTypeDesc.of(CD_String, implParams);
+        DynamicCallSiteDesc entryIndy = supplierIndy(owner, entryHelperName, entryHelperType, implParams);
 
-        // invokedynamic call site: yields a Supplier<String> that, on get(),
-        // calls the static helper method with the captured arguments.
-        DynamicCallSiteDesc indySupplier = DynamicCallSiteDesc.of(LMF_BOOTSTRAP, "get", MethodTypeDesc.of(CD_Supplier, implParams),   // capture type
-                MethodTypeDesc.of(CD_Object),                 // SAM erasure
-                implHandle,                                   // implementation
-                MethodTypeDesc.of(CD_String)                  // instantiated type
-        );
+        ClassDesc returnType = mm.methodTypeSymbol().returnType();
+        boolean isVoid = returnType.equals(CD_void);
 
-        String loggerName = (owner.packageName().isEmpty() ? "" : owner.packageName() + ".") + owner.displayName();
+        boolean logReturn = info.logReturn();
+        boolean logException = !OFF.equals(info.exceptionLevelName());
 
-        // (a) Re-emit the original method 1:1, replacing only the Code attribute.
-        //     transformMethod inherits name, descriptor, flags, and annotations
-        //     automatically.
+        // Return helper: (boxedP1, ..., boxedReturn?) -> String
+        // Captures: parameters first, then (if non-void) the boxed return value.
+        String returnHelperName = null;
+        DynamicCallSiteDesc returnIndy = null;
+        MethodTypeDesc returnHelperType = null;
+        String returnMessage = null;
+        if (logReturn) {
+            List<ClassDesc> retCaptureTypes = new ArrayList<>(implParams);
+            if (!isVoid) retCaptureTypes.add(boxOf(returnType));
+            returnHelperName = "lambda$logweaver$" + mm.methodName().stringValue() + "$ret$" + descHash(mm);
+            returnHelperType = MethodTypeDesc.of(CD_String, retCaptureTypes);
+            returnIndy = supplierIndy(owner, returnHelperName, returnHelperType, retCaptureTypes);
+            returnMessage = synthesizeReturnMessage(owner, mm, isVoid);
+        }
+
+        // Local-slot allocation for the return value and the throwable. Both
+        // sit *above* the method's original max_locals so they cannot collide
+        // with any local already used by the body.
+        int origMaxLocals = mm.findAttribute(Attributes.code()).map(CodeAttribute::maxLocals).orElse(0);
+        int resultSlots = (logReturn && !isVoid) ? slotWidth(returnType) : 0;
+        int resultSlot = origMaxLocals;
+        int throwableSlot = origMaxLocals + resultSlots;
+
+        // Captures used by both the closures below.
+        final DynamicCallSiteDesc returnIndyFinal = returnIndy;
+
         clb.transformMethod(mm, (mb, mElement) -> {
             if (mElement instanceof CodeModel code) {
                 mb.withCode(cb -> {
-                    // Logger logger = System.getLogger(<class>);
-                    cb.ldc(loggerName);
-                    cb.invokestatic(CD_System, "getLogger", MethodTypeDesc.of(CD_Logger, CD_String));
-
-                    // Load the level constant: Logger.Level.<NAME>
+                    // ── Entry log ───────────────────────────────────────────
+                    cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
                     cb.getstatic(CD_Level, info.levelName(), CD_Level);
-
-                    // Load parameters (boxing primitives) – capture for invokedynamic.
                     for (ParamSlot ps : params) {
                         ps.load(cb);
                         if (ps.isPrimitive()) {
                             cb.invokestatic(ps.boxed(), "valueOf", MethodTypeDesc.of(ps.boxed(), ps.type()));
                         }
                     }
-
-                    // Supplier<String> via LambdaMetafactory.
-                    cb.invokedynamic(indySupplier);
-
-                    // logger.log(level, supplier);
+                    cb.invokedynamic(entryIndy);
                     cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
 
-                    // Append the method's original code.
-                    code.forEach(cb);
+                    // ── Body, optionally wrapped in try/catch ───────────────
+                    Label tryStart = logException ? cb.newLabel() : null;
+                    Label tryEnd = logException ? cb.newLabel() : null;
+                    Label handler = logException ? cb.newLabel() : null;
+
+                    if (logException) cb.labelBinding(tryStart);
+
+                    // Original code, with each ReturnInstruction preceded by a
+                    // return-log emission.
+                    code.forEach(element -> {
+                        if (logReturn && element instanceof ReturnInstruction) {
+                            // Return log re-uses the entry-log level.
+                            emitReturnLog(cb, owner, info.levelName(), params,
+                                    returnType, isVoid, resultSlot, returnIndyFinal);
+                        }
+                        cb.with(element);
+                    });
+
+                    if (logException) {
+                        cb.labelBinding(tryEnd);
+
+                        // Handler: log + rethrow.
+                        cb.labelBinding(handler);
+                        cb.astore(throwableSlot);
+                        cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
+                        cb.getstatic(CD_Level, info.exceptionLevelName(), CD_Level);
+                        cb.aload(throwableSlot);
+                        cb.invokevirtual(CD_Throwable, "getMessage", MethodTypeDesc.of(CD_String));
+                        cb.aload(throwableSlot);
+                        cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_String, CD_Throwable));
+                        cb.aload(throwableSlot);
+                        cb.athrow();
+
+                        cb.exceptionCatch(tryStart, tryEnd, handler, CD_Throwable);
+                    }
                 });
+            } else if (mElement instanceof RuntimeVisibleAnnotationsAttribute attrs) {
+                List<Annotation> kept = attrs.annotations().stream().filter(a -> !a.classSymbol().equals(CD_Log)).toList();
+                if (!kept.isEmpty()) {
+                    mb.with(RuntimeVisibleAnnotationsAttribute.of(kept));
+                }
+                // else: drop the attribute entirely so re-runs find no @Log.
             } else {
                 mb.with(mElement);
             }
         });
 
-        // (b) Append the synthetic format method directly in the same builder.
-        clb.withMethod(implName, implType, ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_SYNTHETIC, mb -> mb.withCode(cb -> {
-            cb.ldc(info.message());
-            cb.ldc(implParams.size());
+        // Append the synthetic format helpers. The entry message is always
+        // synthesized – @Log no longer carries a value() attribute.
+        emitFormatHelper(clb, entryHelperName, entryHelperType, synthesizeMessage(owner, mm));
+        if (logReturn) {
+            emitFormatHelper(clb, returnHelperName, returnHelperType, returnMessage);
+        }
+    }
+
+    /**
+     * Emits the return-log call right before a {@link ReturnInstruction}. For a
+     * non-void method the value to be returned is on top of the operand stack
+     * on entry; this helper stores it in {@code resultSlot}, formats and logs
+     * the message, then restores it so the original {@code XRETURN} instruction
+     * (emitted by the caller) can consume it again.
+     */
+    private static void emitReturnLog(CodeBuilder cb,
+                                      ClassDesc owner,
+                                      String levelName,
+                                      List<ParamSlot> params,
+                                      ClassDesc returnType,
+                                      boolean isVoid,
+                                      int resultSlot,
+                                      DynamicCallSiteDesc returnIndy) {
+        // Save the return value off the stack so we can both log and return it.
+        if (!isVoid) {
+            storeAt(cb, returnType, resultSlot);
+        }
+
+        cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
+        cb.getstatic(CD_Level, levelName, CD_Level);
+
+        // Captures: parameters first (boxed), then the boxed return value.
+        for (ParamSlot ps : params) {
+            ps.load(cb);
+            if (ps.isPrimitive()) {
+                cb.invokestatic(ps.boxed(), "valueOf", MethodTypeDesc.of(ps.boxed(), ps.type()));
+            }
+        }
+        if (!isVoid) {
+            loadAt(cb, returnType, resultSlot);
+            if (returnType.isPrimitive()) {
+                ClassDesc box = boxOf(returnType);
+                cb.invokestatic(box, "valueOf", MethodTypeDesc.of(box, returnType));
+            }
+        }
+
+        cb.invokedynamic(returnIndy);
+        cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
+
+        // Reload the return value so the original XRETURN can consume it.
+        if (!isVoid) {
+            loadAt(cb, returnType, resultSlot);
+        }
+    }
+
+    /**
+     * Builds the {@code Supplier<String>} {@code invokedynamic} call site that
+     * captures the given parameters and (on {@code .get()}) invokes the
+     * named static helper to produce the formatted log message.
+     */
+    private static DynamicCallSiteDesc supplierIndy(ClassDesc owner, String helperName,
+                                                    MethodTypeDesc helperType, List<ClassDesc> captureTypes) {
+        DirectMethodHandleDesc handle = MethodHandleDesc.ofMethod(
+                DirectMethodHandleDesc.Kind.STATIC, owner, helperName, helperType);
+        return DynamicCallSiteDesc.of(LMF_BOOTSTRAP, "get",
+                MethodTypeDesc.of(CD_Supplier, captureTypes),
+                MethodTypeDesc.of(CD_Object),
+                handle,
+                MethodTypeDesc.of(CD_String));
+    }
+
+    /**
+     * Emits a synthetic helper method that returns
+     * {@code message.formatted(arg0, arg1, ...)} — one positional argument per
+     * (boxed) parameter slot.
+     */
+    private static void emitFormatHelper(ClassBuilder clb, String name, MethodTypeDesc type, String message) {
+        int paramCount = type.parameterCount();
+        clb.withMethod(name, type, ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_SYNTHETIC, mb -> mb.withCode(cb -> {
+            cb.ldc(message);
+            cb.ldc(paramCount);
             cb.anewarray(CD_Object);
-            for (int i = 0; i < implParams.size(); i++) {
+            for (int i = 0; i < paramCount; i++) {
                 cb.dup();
                 cb.ldc(i);
                 cb.aload(i);   // every parameter is an object (boxed)
@@ -222,6 +451,19 @@ public class LogWeaver extends AbstractMojo {
             cb.invokevirtual(CD_String, "formatted", MethodTypeDesc.of(CD_String, CD_ObjectArray));
             cb.areturn();
         }));
+    }
+
+    /**
+     * Deterministic name for the synthetic format helper. Includes a hash of
+     * the method's descriptor so overloaded methods produce distinct helpers
+     * and so already-woven methods can be detected on a re-run.
+     */
+    private static String syntheticName(MethodModel mm) {
+        return "lambda$logweaver$" + mm.methodName().stringValue() + "$" + descHash(mm);
+    }
+
+    private static String descHash(MethodModel mm) {
+        return Integer.toHexString(mm.methodType().stringValue().hashCode() & 0x7fffffff);
     }
 
     // ── Annotation reading ───────────────────────────────────────────────────
@@ -234,19 +476,23 @@ public class LogWeaver extends AbstractMojo {
     }
 
     private static LogInfo extractLogInfo(Annotation ann) {
-        String message = LOG_DEFAULTS.message();
         String levelName = LOG_DEFAULTS.levelName();
+        boolean logReturn = LOG_DEFAULTS.logReturn();
+        String exceptionLevelName = LOG_DEFAULTS.exceptionLevelName();
         for (AnnotationElement el : ann.elements()) {
             switch (el.name().stringValue()) {
-                case "value" -> {
-                    if (el.value() instanceof AnnotationValue.OfString s) message = s.stringValue();
-                }
                 case "level" -> {
                     if (el.value() instanceof AnnotationValue.OfEnum e) levelName = e.constantName().stringValue();
                 }
+                case "logReturn" -> {
+                    if (el.value() instanceof AnnotationValue.OfBoolean b) logReturn = b.booleanValue();
+                }
+                case "exceptionLevel" -> {
+                    if (el.value() instanceof AnnotationValue.OfEnum e) exceptionLevelName = e.constantName().stringValue();
+                }
             }
         }
-        return new LogInfo(message, levelName);
+        return new LogInfo(levelName, logReturn, exceptionLevelName);
     }
 
     // ── @LogAll: scope pre-scan, reading, resolution ─────────────────────────
@@ -316,23 +562,27 @@ public class LogWeaver extends AbstractMojo {
     private static final LogAllConfig LOG_ALL_DEFAULTS = loadLogAllDefaults();
 
     private static LogInfo loadLogDefaults() {
-        String message = "";
         String levelName = "INFO";
+        boolean logReturn = false;
+        String exceptionLevelName = OFF;
         try {
             for (Method m : Class.forName("io.github.ralfspoeth.log.api.Log").getDeclaredMethods()) {
                 Object dv = m.getDefaultValue();
                 if (dv == null) continue;
                 switch (m.getName()) {
-                    case "value" -> {
-                        if (dv instanceof String s) message = s;
-                    }
                     case "level" -> {
                         if (dv instanceof Enum<?> e) levelName = e.name();
+                    }
+                    case "logReturn" -> {
+                        if (dv instanceof Boolean b) logReturn = b;
+                    }
+                    case "exceptionLevel" -> {
+                        if (dv instanceof Enum<?> e) exceptionLevelName = e.name();
                     }
                 }
             }
         } catch (Throwable ignore) { /* fallbacks stand */ }
-        return new LogInfo(message, levelName);
+        return new LogInfo(levelName, logReturn, exceptionLevelName);
     }
 
     private static LogAllConfig loadLogAllDefaults() {
@@ -360,7 +610,8 @@ public class LogWeaver extends AbstractMojo {
     }
 
     /**
-     * Synthetic message for {@code @LogAll}-woven methods:
+     * Synthetic message for the entry log of a {@code @LogAll}-woven method or
+     * a {@code @Log} with empty {@code value()}:
      * {@code "<SimpleClass>.<method>(%s, %s, ...)"} with one {@code %s} per parameter.
      */
     private static String synthesizeMessage(ClassDesc owner, MethodModel mm) {
@@ -369,7 +620,66 @@ public class LogWeaver extends AbstractMojo {
         return owner.displayName() + "." + mm.methodName().stringValue() + "(" + args + ")";
     }
 
-    record LogInfo(String message, String levelName) {}
+    /**
+     * Synthetic message for the return log:
+     * <ul>
+     *   <li>void → {@code "<SimpleClass>.<method>(%s, %s) -> void"} (params)</li>
+     *   <li>non-void → {@code "<SimpleClass>.<method>(%s, %s) -> %s"}
+     *       (params, then the return value)</li>
+     * </ul>
+     */
+    private static String synthesizeReturnMessage(ClassDesc owner, MethodModel mm, boolean isVoid) {
+        int paramCount = mm.methodTypeSymbol().parameterCount();
+        String args = String.join(", ", Collections.nCopies(paramCount, "%s"));
+        String tail = isVoid ? "void" : "%s";
+        return owner.displayName() + "." + mm.methodName().stringValue() + "(" + args + ") -> " + tail;
+    }
+
+    // ── Type/slot helpers ────────────────────────────────────────────────────
+
+    private static int slotWidth(ClassDesc type) {
+        return (type.equals(CD_long) || type.equals(CD_double)) ? 2 : 1;
+    }
+
+    private static ClassDesc boxOf(ClassDesc type) {
+        if (type.equals(CD_boolean)) return CD_Boolean;
+        if (type.equals(CD_byte)) return CD_Byte;
+        if (type.equals(CD_char)) return CD_Character;
+        if (type.equals(CD_short)) return CD_Short;
+        if (type.equals(CD_int)) return CD_Integer;
+        if (type.equals(CD_long)) return CD_Long;
+        if (type.equals(CD_float)) return CD_Float;
+        if (type.equals(CD_double)) return CD_Double;
+        return type; // already a reference type
+    }
+
+    private static void storeAt(CodeBuilder cb, ClassDesc type, int slot) {
+        if (type.equals(CD_long)) cb.lstore(slot);
+        else if (type.equals(CD_double)) cb.dstore(slot);
+        else if (type.equals(CD_float)) cb.fstore(slot);
+        else if (type.equals(CD_int) || type.equals(CD_boolean) || type.equals(CD_byte) || type.equals(CD_char) || type.equals(CD_short))
+            cb.istore(slot);
+        else cb.astore(slot);
+    }
+
+    private static void loadAt(CodeBuilder cb, ClassDesc type, int slot) {
+        if (type.equals(CD_long)) cb.lload(slot);
+        else if (type.equals(CD_double)) cb.dload(slot);
+        else if (type.equals(CD_float)) cb.fload(slot);
+        else if (type.equals(CD_int) || type.equals(CD_boolean) || type.equals(CD_byte) || type.equals(CD_char) || type.equals(CD_short))
+            cb.iload(slot);
+        else cb.aload(slot);
+    }
+
+    /**
+     * Carries the three configurable fields of an {@code @Log} annotation:
+     * the entry-log level, the {@code logReturn} toggle (return-log uses the
+     * same level as entry), and the exception level. The exception level uses
+     * the literal string {@code "OFF"} as the "do-not-log" sentinel. The
+     * entry-log message itself is always synthesized – see
+     * {@link #synthesizeMessage(ClassDesc, MethodModel)}.
+     */
+    record LogInfo(String levelName, boolean logReturn, String exceptionLevelName) {}
 
     /**
      * Configuration of a {@code @LogAll} annotation.
