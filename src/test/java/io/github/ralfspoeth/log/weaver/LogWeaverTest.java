@@ -345,8 +345,12 @@ class LogWeaverTest {
     @Test
     void returnLogForVoidMethodEmitsHelperWithoutResultCapture(@TempDir Path tempDir) throws Exception {
         ClassDesc cd = ClassDesc.of("com.example.RetVoid");
+        // Pin exceptionLevel=OFF so this test stays independent of @Log's API-side default,
+        // which changed in log-api 0.5. Without this, the woven body would include a
+        // Throwable handler and the INVOKEINTERFACE count would be 3 instead of 2.
         Annotation logAnn = Annotation.of(LOG_CD,
-                AnnotationElement.of("logReturn", AnnotationValue.ofBoolean(true)));
+                AnnotationElement.of("logReturn", AnnotationValue.ofBoolean(true)),
+                AnnotationElement.of("exceptionLevel", AnnotationValue.ofEnum(LEVEL_CD, "OFF")));
 
         Path classFile = writeFixture(tempDir, cd,
                 "doIt", MethodTypeDesc.of(CD_void, STRING_CD), logAnn);
@@ -516,9 +520,11 @@ class LogWeaverTest {
     }
 
     @Test
-    void defaultsDoNotEmitReturnOrExceptionLogging(@TempDir Path tempDir) throws Exception {
+    void defaultsEmitExceptionLoggingAtWarningButNoReturnLog(@TempDir Path tempDir) throws Exception {
         ClassDesc cd = ClassDesc.of("com.example.PlainLog");
-        // Only entry log – logReturn defaults to false, exceptionLevel to OFF.
+        // log-api 0.5 contract for a bare @Log:
+        //   logReturn      → false  (no return helper)
+        //   exceptionLevel → WARNING (Throwable handler installed)
         Annotation logAnn = Annotation.of(LOG_CD);
 
         Path classFile = writeFixture(tempDir, cd,
@@ -528,19 +534,23 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // No return helper is generated.
+        // logReturn defaults to false → no return helper.
         assertFalse(hasMethodWithPrefix(cm, "lambda$logweaver$greet$ret$"),
-                "logReturn=false must not produce a return helper");
+                "logReturn=false (default) must not produce a return helper");
 
-        // No Throwable handler in the woven method.
+        // exceptionLevel defaults to WARNING → Throwable handler is installed.
         ClassDesc throwableCd = ClassDesc.of("java.lang.Throwable");
         MethodModel greet = findMethod(cm, "greet");
         CodeAttribute code = greet.findAttribute(Attributes.code()).orElseThrow();
-        assertFalse(code.exceptionHandlers().stream()
+        assertTrue(code.exceptionHandlers().stream()
                         .anyMatch(eh -> eh.catchType()
                                 .map(ce -> ce.asSymbol().equals(throwableCd))
                                 .orElse(false)),
-                "OFF exceptionLevel must not add a Throwable handler");
+                "default exceptionLevel (WARNING) must add a Throwable handler");
+
+        // …and the handler references Level.WARNING.
+        assertTrue(fieldRefNames(greet, LEVEL_CD).contains("WARNING"),
+                "default exceptionLevel must be WARNING");
     }
 
     // ── Idempotency ──────────────────────────────────────────────────────────
