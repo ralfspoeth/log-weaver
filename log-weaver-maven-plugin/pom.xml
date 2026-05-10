@@ -21,6 +21,9 @@
 
     <build>
         <plugins>
+            <!-- maven-javadoc-plugin and maven-source-plugin are inherited
+                 from the parent so they apply to every module Central wants
+                 to validate. Only the Mojo metadata generator is module-specific. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-plugin-plugin</artifactId>
@@ -28,14 +31,6 @@
                 <configuration>
                     <goalPrefix>weaver</goalPrefix>
                 </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-javadoc-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-source-plugin</artifactId>
             </plugin>
         </plugins>
     </build>

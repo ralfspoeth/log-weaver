@@ -78,6 +78,17 @@
             </plugins>
         </pluginManagement>
         <plugins>
+            <!-- Central requires javadoc + sources jars (and signatures of both)
+                 on every deployed artifact, so these have to run for every
+                 module — not just the Maven-plugin module. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+            </plugin>
             <!-- inherited release plumbing from plumbum stays in place -->
             <plugin>
                 <groupId>org.sonatype.plugins</groupId>
