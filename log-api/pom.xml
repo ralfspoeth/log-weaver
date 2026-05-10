@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.ralfspoeth</groupId>
+        <artifactId>log-weaver</artifactId>
+        <version>0.9-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>log-api</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Log API</name>
+    <description>
+        Annotations consumed by log-weaver — Log on methods and LogAll on
+        types, packages, or modules. No runtime dependencies; pulled in as a
+        compile-time dependency on the project being woven, and read
+        reflectively by log-weaver-core for default-value resolution.
+    </description>
+</project>

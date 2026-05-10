@@ -34,3 +34,4 @@ build/
 ### Mac OS ###
 .DS_Store
 .java-version
+/log-weaver-agent/dependency-reduced-pom.xml

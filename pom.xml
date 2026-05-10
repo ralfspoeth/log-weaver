@@ -16,6 +16,7 @@
     <description>
         Bytecode-level logging weaver driven by the Log/LogAll annotations from log-api.
         Modules:
+        - log-api                 : the Log / LogAll annotation types
         - log-weaver-core         : transformation engine (no build-tool dependencies)
         - log-weaver-maven-plugin : @Mojo wrapping the core for the Maven build
         - log-weaver-agent        : Java agent wrapping the core as a ClassFileTransformer
@@ -36,6 +37,7 @@
     </properties>
 
     <modules>
+        <module>log-api</module>
         <module>log-weaver-core</module>
         <module>log-weaver-maven-plugin</module>
         <module>log-weaver-agent</module>
@@ -45,13 +47,13 @@
         <dependencies>
             <dependency>
                 <groupId>${project.groupId}</groupId>
-                <artifactId>log-weaver-core</artifactId>
+                <artifactId>log-api</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
-                <groupId>io.github.ralfspoeth</groupId>
-                <artifactId>log-api</artifactId>
-                <version>0.5</version>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-core</artifactId>
+                <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit</groupId>

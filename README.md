@@ -12,12 +12,15 @@ The project is a multi-module Maven build:
 
 | module | what it ships |
 |---|---|
+| `log-api` | the `@Log` / `@LogAll` annotation types — the only thing user code needs to compile against |
 | `log-weaver-core` | the transformation engine — no build-tool dependencies, embeddable |
 | `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes` |
 | `log-weaver-agent` | a Java agent that runs the core as a `ClassFileTransformer` at class-load time |
 
-The core is the single source of truth; the Maven plugin and the agent are
-just glue around it.
+The core is the single source of truth for the transformation; the Maven
+plugin and the agent are just glue around it. All four modules share the
+same version and release together — `log-api`'s use outside this project is
+negligible, so co-versioning is simpler than keeping it on its own track.
 
 ## How it works
 
@@ -80,7 +83,7 @@ dependency for the annotations themselves:
     <dependency>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-api</artifactId>
-        <version>0.5</version>
+        <version>0.9</version>
     </dependency>
 </dependencies>
 
@@ -89,7 +92,7 @@ dependency for the annotations themselves:
         <plugin>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-maven-plugin</artifactId>
-            <version>0.5</version>
+            <version>0.9</version>
             <executions>
                 <execution>
                     <goals>
@@ -112,7 +115,7 @@ manifest entry, so a single `-javaagent` flag suffices:
 
 ```sh
 java -javaagent:/path/to/log-weaver-agent-<version>.jar \
-     -cp app.jar:log-api-0.5.jar \
+     -cp app.jar:log-api-<version>.jar \
      com.example.Main
 ```
 
@@ -250,6 +253,10 @@ which makes interleaved log lines from concurrent fixtures readable.
 
 ```
 log-weaver/                              parent POM (packaging=pom)
+├── log-api/
+│   └── src/main/java/.../api/
+│       ├── Log.java                     @Target(METHOD)
+│       └── LogAll.java                  @Target(TYPE, PACKAGE, MODULE)
 ├── log-weaver-core/
 │   └── src/main/java/.../core/
 │       ├── LogWeaverCore.java           transformClass / scanScopes /
