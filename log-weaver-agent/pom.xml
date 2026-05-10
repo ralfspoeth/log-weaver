@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.ralfspoeth</groupId>
+        <artifactId>log-weaver</artifactId>
+        <version>0.8-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>log-weaver-agent</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Log Weaver Java Agent</name>
+    <description>
+        Java agent that weaves Log/LogAll annotations into classes at load time via
+        java.lang.instrument.ClassFileTransformer. Shades log-weaver-core so a
+        single -javaagent=&lt;path-to-agent.jar&gt; flag is sufficient.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>log-weaver-core</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.3</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>true</createDependencyReducedPom>
+                            <artifactSet>
+                                <includes>
+                                    <include>${project.groupId}:log-weaver-core</include>
+                                </includes>
+                            </artifactSet>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <manifestEntries>
+                                        <Premain-Class>io.github.ralfspoeth.log.weaver.agent.LogWeaverAgent</Premain-Class>
+                                        <Agent-Class>io.github.ralfspoeth.log.weaver.agent.LogWeaverAgent</Agent-Class>
+                                        <Can-Redefine-Classes>false</Can-Redefine-Classes>
+                                        <Can-Retransform-Classes>false</Can-Retransform-Classes>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

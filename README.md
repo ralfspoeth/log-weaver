@@ -1,16 +1,27 @@
 # log-weaver
 
-A Maven plugin that weaves `java.lang.System.Logger` calls into compiled classes,
-driven by the annotations defined in
-[log-api](https://github.com/ralfspoeth/log-api) (`@Log`, `@LogAll`).
+Bytecode-level logging weaver for `java.lang.System.Logger`, driven by the
+annotations from [log-api](https://github.com/ralfspoeth/log-api)
+(`@Log`, `@LogAll`).
 
 The goal is to keep production code free of `if (logger.isLoggable(...))`
 boilerplate while still emitting structured, lazy log records — without pulling
 in a third-party logging facade.
 
+The project is a multi-module Maven build:
+
+| module | what it ships |
+|---|---|
+| `log-weaver-core` | the transformation engine — no build-tool dependencies, embeddable |
+| `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes` |
+| `log-weaver-agent` | a Java agent that runs the core as a `ClassFileTransformer` at class-load time |
+
+The core is the single source of truth; the Maven plugin and the agent are
+just glue around it.
+
 ## How it works
 
-`log-weaver` runs as a Maven plugin in the `process-classes` phase, after
+The Maven plugin runs in the `process-classes` phase, after
 `maven-compiler-plugin` has produced `*.class` files. For every class under
 `${project.build.outputDirectory}`:
 
@@ -59,7 +70,7 @@ trailing `, ` in the message.
   defaults reflectively at plugin startup, so any future change to
   `@Log`/`@LogAll` defaults takes effect automatically.
 
-## Quick start
+## Quick start — Maven plugin
 
 Add the plugin to the project that should be woven, plus the `log-api`
 dependency for the annotations themselves:
@@ -93,6 +104,35 @@ dependency for the annotations themselves:
 
 The default execution binds to `process-classes`, so a plain `mvn package`
 is enough.
+
+## Quick start — Java agent
+
+The `log-weaver-agent` module produces a shaded jar with a `Premain-Class`
+manifest entry, so a single `-javaagent` flag suffices:
+
+```sh
+java -javaagent:/path/to/log-weaver-agent-<version>.jar \
+     -cp app.jar:log-api-0.5.jar \
+     com.example.Main
+```
+
+`log-api` only needs to be on the *application* classpath — the agent jar
+itself shades `log-weaver-core` so it can stand alone.
+
+The agent installs a `ClassFileTransformer` that calls
+`LogWeaverCore.transformClass` on every loaded class outside the JDK and the
+agent's own packages. `@LogAll` scope resolution is best-effort: when
+transforming `pkg.A`, the agent asks the class's `ClassLoader` for the
+`pkg/package-info.class` and (for named modules) `module-info.class`
+resources, parses them once, and caches the results.
+
+Limitations versus the Maven plugin:
+
+- Classes loaded before the agent attaches (a few JDK internals, the agent
+  itself) can't be transformed.
+- Transformation runs once per JVM start rather than once at build time.
+- A class without a discoverable `package-info.class` simply doesn't get
+  the package scope — `@Log` and class-level `@LogAll` still work normally.
 
 ## The annotations
 
@@ -209,12 +249,25 @@ which makes interleaved log lines from concurrent fixtures readable.
 ## Project layout
 
 ```
-src/main/java/io/github/ralfspoeth/log/weaver/LogWeaver.java
-    – the @Mojo "weave"; does the entire transformation in one pass.
-src/test/java/io/github/ralfspoeth/log/weaver/LogWeaverTest.java
-    – JUnit 5 tests covering @Log, @LogAll, return logging,
-      exception handling, scope resolution, and idempotency.
+log-weaver/                              parent POM (packaging=pom)
+├── log-weaver-core/
+│   └── src/main/java/.../core/
+│       ├── LogWeaverCore.java           transformClass / scanScopes /
+│       │                                weaveDirectory / readScopeConfig
+│       ├── Scopes.java                  public record
+│       └── LogAllConfig.java            public record
+├── log-weaver-maven-plugin/
+│   └── src/main/java/.../maven/
+│       └── WeaveMojo.java               @Mojo "weave" → LogWeaverCore.weaveDirectory
+└── log-weaver-agent/
+    └── src/main/java/.../agent/
+        └── LogWeaverAgent.java          premain + ClassFileTransformer
+                                         → LogWeaverCore.transformClass
 ```
+
+Tests live in `log-weaver-core/src/test/...LogWeaverCoreTest.java`. They
+build their input classes directly through `java.lang.classfile`, so the
+core is self-contained and doesn't need a fixture project.
 
 ## License
 

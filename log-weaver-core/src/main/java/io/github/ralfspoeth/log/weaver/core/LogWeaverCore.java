@@ -1,11 +1,4 @@
-package io.github.ralfspoeth.log.weaver;
-
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.plugins.annotations.ResolutionScope;
+package io.github.ralfspoeth.log.weaver.core;
 
 import java.io.IOException;
 import java.lang.classfile.*;
@@ -19,24 +12,41 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.Predicate;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static java.lang.constant.ConstantDescs.*;
 import static java.util.function.Predicate.not;
 
-@Mojo(name = "weave", defaultPhase = LifecyclePhase.PROCESS_CLASSES, requiresDependencyResolution = ResolutionScope.COMPILE)
-public class LogWeaver extends AbstractMojo {
+/**
+ * Bytecode transformation engine. Public entry points:
+ * <ul>
+ *   <li>{@link #transformClass(byte[], Scopes)} — transform one class' bytes.</li>
+ *   <li>{@link #scanScopes(Path)} — pre-scan a classes directory for
+ *       {@code module-info.class} / {@code package-info.class} configurations.</li>
+ *   <li>{@link #readScopeConfig(byte[])} — read {@code @LogAll} from a single
+ *       parsed info-class.</li>
+ *   <li>{@link #weaveDirectory(Path)} — convenience for build-tool plugins:
+ *       walks a directory, transforms each {@code *.class}, writes back in
+ *       place, and returns a {@link WeaveStats}.</li>
+ * </ul>
+ *
+ * <p>This class has no Maven, Gradle, or agent dependencies and can be embedded
+ * in any of those wrappers.</p>
+ */
+public final class LogWeaverCore {
 
-    @Parameter(defaultValue = "${project.build.outputDirectory}", readonly = true)
-    private Path classesDir;
+    private LogWeaverCore() {}
+
+    /** Synthetic per-class field that holds the {@link System.Logger} instance. */
+    public static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
 
     /**
-     * Test-only setter — Maven injects {@link #classesDir} directly into the field.
+     * Synthetic per-class helper that strips the leading {@code '['} and
+     * trailing {@code ']'} from {@code Arrays.toString(...)} output, so a
+     * varargs argument shows up in the log message as comma-separated
+     * elements rather than as the raw array's identity hash.
      */
-    public void setClassesDir(Path classesDir) {
-        this.classesDir = classesDir;
-    }
+    public static final String VA_HELPER_NAME = "$logweaver$va";
 
     // ── Constants ────────────────────────────────────────────────────────────
     // CD_String, CD_Object, CD_Boolean etc. come from ConstantDescs (static import).
@@ -49,19 +59,6 @@ public class LogWeaver extends AbstractMojo {
     private static final ClassDesc CD_Arrays = ClassDesc.of("java.util.Arrays");
     private static final ClassDesc CD_Log = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
     private static final ClassDesc CD_LogAll = ClassDesc.of("io.github.ralfspoeth.log.api.LogAll");
-
-    /**
-     * Synthetic per-class field that holds the {@link System.Logger} instance.
-     */
-    static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
-
-    /**
-     * Synthetic per-class helper that strips the leading {@code '['} and
-     * trailing {@code ']'} from {@code Arrays.toString(...)} output, so a
-     * varargs argument shows up in the log message as comma-separated
-     * elements rather than as the raw array's identity hash.
-     */
-    static final String VA_HELPER_NAME = "$logweaver$va";
 
     private static final DirectMethodHandleDesc LMF_BOOTSTRAP = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC,
             ClassDesc.of("java.lang.invoke.LambdaMetafactory"),
@@ -77,73 +74,113 @@ public class LogWeaver extends AbstractMojo {
             )
     );
 
-    // ── execute ──────────────────────────────────────────────────────────────
-    @Override
-    public void execute() throws MojoExecutionException {
+    // ── Public API ───────────────────────────────────────────────────────────
 
-        if (!Files.isDirectory(classesDir)) {
-            getLog().info("LogWeaver: " + classesDir + " does not exist, skipped.");
-            return;
-        }
+    /**
+     * Transform the given class file bytes.
+     *
+     * @return the original array reference iff no transformation was needed
+     *         (no {@code @Log} on any method, no {@code @LogAll} matching).
+     *         Otherwise a fresh byte array.
+     */
+    public static byte[] transformClass(byte[] classBytes, Scopes scopes) {
+        return tryTransform(classBytes, scopes);
+    }
+
+    /**
+     * Walks the given directory and transforms each {@code *.class} file in
+     * place. Errors are collected per-file and returned in {@link WeaveStats};
+     * I/O errors at the directory level are thrown.
+     */
+    public static WeaveStats weaveDirectory(Path classesDir) throws IOException {
+        if (!Files.isDirectory(classesDir)) return new WeaveStats(0, 0, Map.of());
+
+        Scopes scopes = scanScopes(classesDir);
 
         int[] stats = {0, 0}; // [checked, transformed]
-        List<Path> failed = new ArrayList<>();
-
-        Scopes scopes;
-        try {
-            // First pass: collect @LogAll from module-info / package-info.
-            scopes = scanScopes(classesDir);
-        } catch (IOException e) {
-            throw new MojoExecutionException("LogWeaver: error during pre-scan of " + classesDir, e);
-        }
+        Map<Path, Throwable> errors = new LinkedHashMap<>();
 
         try (var stream = Files.walk(classesDir)) {
             var classMatcher = classesDir.getFileSystem().getPathMatcher("glob:*.class");
             var infoMatcher = classesDir.getFileSystem().getPathMatcher("glob:*-info.class");
-            stream.filter(p -> classMatcher.matches(p.getFileName())).filter(not(p -> infoMatcher.matches(p.getFileName()))).forEach(p -> {
-                if (!processClass(p, stats, scopes)) failed.add(p);
-            });
-        } catch (IOException e) {
-            throw new MojoExecutionException("LogWeaver: error walking " + classesDir, e);
+            stream.filter(p -> classMatcher.matches(p.getFileName()))
+                    .filter(not(p -> infoMatcher.matches(p.getFileName())))
+                    .forEach(p -> {
+                        stats[0]++;
+                        try {
+                            byte[] original = Files.readAllBytes(p);
+                            byte[] transformed = tryTransform(original, scopes);
+                            if (transformed != original) {
+                                Files.write(p, transformed);
+                                stats[1]++;
+                            }
+                        } catch (Throwable t) {
+                            errors.put(p, t);
+                        }
+                    });
         }
 
-        if (!failed.isEmpty()) {
-            failed.forEach(p -> getLog().error("LogWeaver: error in " + p));
-            throw new MojoExecutionException("LogWeaver: " + failed.size() + " class(es) could not be transformed.");
-        }
-
-        getLog().info(String.format("LogWeaver: %d classes checked, %d transformed.", stats[0], stats[1]));
+        return new WeaveStats(stats[0], stats[1], errors);
     }
 
-    // ── Single .class file ───────────────────────────────────────────────────
-    private boolean processClass(Path classFile, int[] stats, Scopes scopes) {
-        stats[0]++;
-        try {
-            byte[] original = Files.readAllBytes(classFile);
-            byte[] transformed = tryTransform(original, scopes);
-            // tryTransform returns the original reference array iff no annotation
-            // was found – otherwise always a new array.
-            if (transformed != original) {
-                Files.write(classFile, transformed);
-                stats[1]++;
-                getLog().debug("LogWeaver: transformed → " + classFile);
-            }
-            return true;
-        } catch (Exception e) {
-            getLog().error("LogWeaver: error in " + classFile + ": " + e.getMessage(), e);
-            return false;
+    /**
+     * First pass: reads {@code module-info.class} and every {@code package-info.class}
+     * file in the tree and collects their respective {@code @LogAll} configurations.
+     */
+    public static Scopes scanScopes(Path root) throws IOException {
+        List<Path> infoFiles;
+        try (var stream = Files.walk(root)) {
+            infoFiles = stream.filter(p -> {
+                String n = p.getFileName().toString();
+                return n.equals("module-info.class") || n.equals("package-info.class");
+            }).toList();
         }
+
+        Optional<LogAllConfig> moduleConfig = Optional.empty();
+        Map<String, LogAllConfig> packageConfigs = new HashMap<>();
+
+        for (Path info : infoFiles) {
+            ClassModel cm = ClassFile.of().parse(Files.readAllBytes(info));
+            Optional<LogAllConfig> cfg = readLogAllConfigFromClass(cm);
+            if (cfg.isEmpty()) continue;
+
+            if (info.getFileName().toString().equals("module-info.class")) {
+                moduleConfig = cfg;
+            } else {
+                packageConfigs.put(cm.thisClass().asSymbol().packageName(), cfg.get());
+            }
+        }
+        return new Scopes(moduleConfig, packageConfigs);
+    }
+
+    /**
+     * Reads the {@code @LogAll} configuration of a parsed
+     * {@code module-info.class} or {@code package-info.class} from its raw bytes.
+     */
+    public static Optional<LogAllConfig> readScopeConfig(byte[] infoClassBytes) {
+        ClassModel cm = ClassFile.of().parse(infoClassBytes);
+        return readLogAllConfigFromClass(cm);
+    }
+
+    /** Result of {@link #weaveDirectory(Path)}: counts plus per-file errors. */
+    public record WeaveStats(int checked, int transformed, Map<Path, Throwable> errors) {
+        public WeaveStats {
+            errors = Map.copyOf(errors);
+        }
+        public boolean isClean() { return errors.isEmpty(); }
     }
 
     // ── Transformation ───────────────────────────────────────────────────────
-    private byte[] tryTransform(byte[] original, Scopes scopes) {
+    private static byte[] tryTransform(byte[] original, Scopes scopes) {
         ClassFile cf = ClassFile.of();
         ClassModel cm = cf.parse(original);
 
         ClassDesc owner = cm.thisClass().asSymbol();
 
         // Resolve the effective @LogAll for this class: type > package > module.
-        Optional<LogAllConfig> effectiveAll = readLogAllConfig(cm).or(() -> Optional.ofNullable(scopes.byPackage().get(owner.packageName()))).or(scopes::module);
+        Optional<LogAllConfig> effectiveAll = readLogAllConfigFromClass(cm)
+                .or(() -> Optional.ofNullable(scopes.byPackage().get(owner.packageName())))
+                .or(scopes::module);
 
         // A method counts as "already woven" iff its synthetic helper is
         // present. The helper name is deterministic per (method name,
@@ -151,7 +188,7 @@ public class LogWeaver extends AbstractMojo {
         Set<String> existingMethodNames = cm.methods().stream().map(m -> m.methodName().stringValue()).collect(Collectors.toUnmodifiableSet());
         Predicate<MethodModel> notYetWoven = mm -> !existingMethodNames.contains(syntheticName(mm));
 
-        boolean anyLog = cm.methods().stream().filter(notYetWoven).anyMatch(this::hasLogAnnotation);
+        boolean anyLog = cm.methods().stream().filter(notYetWoven).anyMatch(LogWeaverCore::hasLogAnnotation);
         boolean anyLogAll = effectiveAll.isPresent() && cm.methods().stream().filter(notYetWoven).anyMatch(effectiveAll.get()::matches);
 
         if (!anyLog && !anyLogAll) return original;
@@ -216,9 +253,7 @@ public class LogWeaver extends AbstractMojo {
         });
     }
 
-    /**
-     * Emits {@code LOGGER = System.getLogger(<loggerName>);} into the given code builder.
-     */
+    /** Emits {@code LOGGER = System.getLogger(<loggerName>);} into the given code builder. */
     private static void emitLoggerInit(CodeBuilder cb, ClassDesc owner, String loggerName) {
         cb.ldc(loggerName);
         cb.invokestatic(CD_System, "getLogger", MethodTypeDesc.of(CD_Logger, CD_String));
@@ -227,23 +262,15 @@ public class LogWeaver extends AbstractMojo {
 
     /**
      * Determines the effective {@link LogInfo} for a method by the
-     * "most-specific wins" rule:
-     * <ol>
-     *     <li>Method-level {@code @Log} beats everything.</li>
-     *     <li>Otherwise the effective {@code @LogAll} (type → package → module)
-     *         applies, if it matches the method.</li>
-     *     <li>Otherwise no weaving.</li>
-     * </ol>
-     * The entry-log message is always synthesized as
-     * {@code <SimpleClass>.<method>(%s, …)} – the same policy as {@code @LogAll}.
+     * "most-specific wins" rule: method-level {@code @Log} beats everything;
+     * otherwise the effective {@code @LogAll} (type → package → module)
+     * applies, if it matches; otherwise no weaving.
      */
-    private Optional<LogInfo> resolveLogInfo(MethodModel mm, Optional<LogAllConfig> effectiveAll) {
+    private static Optional<LogInfo> resolveLogInfo(MethodModel mm, Optional<LogAllConfig> effectiveAll) {
         Optional<LogInfo> methodLog = readLogAnnotation(mm);
         if (methodLog.isPresent()) return methodLog;
 
         if (effectiveAll.isPresent() && effectiveAll.get().matches(mm)) {
-            // @LogAll only drives the entry log; the exception handler is
-            // installed at the @Log default exception level (WARNING in 0.5).
             return Optional.of(new LogInfo(effectiveAll.get().levelName(), false,
                     LOG_DEFAULTS.exceptionLevelName()));
         }
@@ -251,31 +278,12 @@ public class LogWeaver extends AbstractMojo {
     }
 
     /**
-     * Rewrites the annotated method with:
-     * <ol>
-     *   <li>Exactly one supplier-based log call — entry vs. return is
-     *       mutually exclusive:
-     *       <ul>
-     *         <li>{@code logReturn() == false} (the default): a single entry
-     *             log before the body, capturing the (boxed) parameters.</li>
-     *         <li>{@code logReturn() == true}: a single return log emitted
-     *             before each {@link ReturnInstruction}, capturing the
-     *             parameters and (for non-void methods) the return value.</li>
-     *       </ul>
-     *       Both use the {@code level()} of the {@code @Log} annotation and
-     *       a lazy {@link java.util.function.Supplier} built via
-     *       {@code invokedynamic}.</li>
-     *   <li>An always-on {@link Throwable} catch around the body that calls
-     *       {@code logger.log(exceptionLevel, t.getMessage(), t)} and
-     *       re-throws. {@code exceptionLevel} defaults to {@code WARNING}
-     *       (taken from {@code @Log}'s reflective defaults).</li>
-     * </ol>
-     * Only one synthetic helper method is generated per woven method — its
-     * shape (and the format string it carries) reflects which of entry-log or
-     * return-log was emitted. The {@code @Log} annotation is stripped after
-     * weaving so a second pass is a no-op.
+     * Rewrites the annotated method with exactly one supplier-based log call
+     * (entry-only or return-only, depending on {@code logReturn}) plus an
+     * always-on {@link Throwable} catch that logs and rethrows. See the
+     * project README for the contract details.
      */
-    private void weaveMethod(ClassBuilder clb, MethodModel mm, LogInfo info, ClassDesc owner) {
+    private static void weaveMethod(ClassBuilder clb, MethodModel mm, LogInfo info, ClassDesc owner) {
         boolean isStatic = mm.flags().has(AccessFlag.STATIC);
         List<ParamSlot> params = ParamSlot.of(mm, isStatic);
         List<ClassDesc> implParams = params.stream().map(p -> p.isPrimitive() ? p.boxed() : p.type()).toList();
@@ -284,19 +292,10 @@ public class LogWeaver extends AbstractMojo {
         boolean isVoid = returnType.equals(CD_void);
         boolean logReturn = info.logReturn();
 
-        // Varargs methods carry ACC_VARARGS; the last formal parameter is the
-        // implicit array. We make that slot show up as comma-separated elements
-        // in the log message rather than as the array's identity hash. The
-        // captured-arg index of the varargs slot is the same in both helper
-        // shapes (entry: params; return: params + return), since the return
-        // value is appended *after* the params.
         int varargsSlot = mm.flags().has(AccessFlag.VARARGS) && !params.isEmpty()
                 ? params.size() - 1
                 : -1;
 
-        // Single synthetic helper. The name is deterministic (and shared with
-        // the "already woven?" check), but the shape and the message string
-        // depend on whether we're emitting an entry log or a return log.
         String helperName = syntheticName(mm);
         List<ClassDesc> captureTypes;
         String message;
@@ -311,9 +310,6 @@ public class LogWeaver extends AbstractMojo {
         MethodTypeDesc helperType = MethodTypeDesc.of(CD_String, captureTypes);
         DynamicCallSiteDesc indy = supplierIndy(owner, helperName, helperType, captureTypes);
 
-        // Local-slot allocation for the return value (logReturn case) and the
-        // throwable. Both sit *above* the method's original max_locals so they
-        // cannot collide with any local already used by the body.
         int origMaxLocals = mm.findAttribute(Attributes.code()).map(CodeAttribute::maxLocals).orElse(0);
         int resultSlots = (logReturn && !isVoid) ? slotWidth(returnType) : 0;
         int throwableSlot = origMaxLocals + resultSlots;
@@ -327,13 +323,10 @@ public class LogWeaver extends AbstractMojo {
 
                     cb.labelBinding(tryStart);
 
-                    // ── Entry log (params only) when not capturing the return ──
                     if (!logReturn) {
                         emitParamLog(cb, owner, info.levelName(), params, indy);
                     }
 
-                    // ── Body, optionally with each ReturnInstruction preceded
-                    //    by a return-log emission ──
                     code.forEach(element -> {
                         if (logReturn && element instanceof ReturnInstruction) {
                             emitReturnLog(cb, owner, info.levelName(), params,
@@ -344,7 +337,6 @@ public class LogWeaver extends AbstractMojo {
 
                     cb.labelBinding(tryEnd);
 
-                    // ── Always-on Throwable handler: log + rethrow ──
                     cb.labelBinding(handler);
                     cb.astore(throwableSlot);
                     cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
@@ -363,22 +355,14 @@ public class LogWeaver extends AbstractMojo {
                 if (!kept.isEmpty()) {
                     mb.with(RuntimeVisibleAnnotationsAttribute.of(kept));
                 }
-                // else: drop the attribute entirely so re-runs find no @Log.
             } else {
                 mb.with(mElement);
             }
         });
 
-        // One helper per woven method.
         emitFormatHelper(clb, helperName, helperType, message, owner, varargsSlot);
     }
 
-    /**
-     * Emits an entry-log call: loads LOGGER + Level, pushes each (boxed)
-     * parameter onto the stack, then builds the {@code Supplier<String>} via
-     * {@code invokedynamic} and calls
-     * {@link System.Logger#log(System.Logger.Level, java.util.function.Supplier)}.
-     */
     private static void emitParamLog(CodeBuilder cb,
                                      ClassDesc owner,
                                      String levelName,
@@ -396,13 +380,6 @@ public class LogWeaver extends AbstractMojo {
         cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
     }
 
-    /**
-     * Emits the return-log call right before a {@link ReturnInstruction}. For a
-     * non-void method the value to be returned is on top of the operand stack
-     * on entry; this helper stores it in {@code resultSlot}, formats and logs
-     * the message, then restores it so the original {@code XRETURN} instruction
-     * (emitted by the caller) can consume it again.
-     */
     private static void emitReturnLog(CodeBuilder cb,
                                       ClassDesc owner,
                                       String levelName,
@@ -411,7 +388,6 @@ public class LogWeaver extends AbstractMojo {
                                       boolean isVoid,
                                       int resultSlot,
                                       DynamicCallSiteDesc returnIndy) {
-        // Save the return value off the stack so we can both log and return it.
         if (!isVoid) {
             storeAt(cb, returnType, resultSlot);
         }
@@ -419,7 +395,6 @@ public class LogWeaver extends AbstractMojo {
         cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
         cb.getstatic(CD_Level, levelName, CD_Level);
 
-        // Captures: parameters first (boxed), then the boxed return value.
         for (ParamSlot ps : params) {
             ps.load(cb);
             if (ps.isPrimitive()) {
@@ -437,17 +412,11 @@ public class LogWeaver extends AbstractMojo {
         cb.invokedynamic(returnIndy);
         cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
 
-        // Reload the return value so the original XRETURN can consume it.
         if (!isVoid) {
             loadAt(cb, returnType, resultSlot);
         }
     }
 
-    /**
-     * Builds the {@code Supplier<String>} {@code invokedynamic} call site that
-     * captures the given parameters and (on {@code .get()}) invokes the
-     * named static helper to produce the formatted log message.
-     */
     private static DynamicCallSiteDesc supplierIndy(ClassDesc owner, String helperName,
                                                     MethodTypeDesc helperType, List<ClassDesc> captureTypes) {
         DirectMethodHandleDesc handle = MethodHandleDesc.ofMethod(
@@ -459,17 +428,6 @@ public class LogWeaver extends AbstractMojo {
                 MethodTypeDesc.of(CD_String));
     }
 
-    /**
-     * Emits a synthetic helper method that returns
-     * {@code message.formatted(arg0, arg1, ...)} — one positional argument per
-     * (boxed) parameter slot.
-     *
-     * <p>If {@code varargsSlot >= 0}, the argument at that slot is a Java
-     * varargs array: instead of pushing the array reference into the format
-     * args (which would render as {@code [Ljava/lang/String;@…}), we push
-     * {@code $logweaver$va(Arrays.toString(arr))} — i.e. its elements
-     * comma-separated, without the surrounding {@code [} / {@code ]}.
-     */
     private static void emitFormatHelper(ClassBuilder clb, String name, MethodTypeDesc type,
                                          String message, ClassDesc owner, int varargsSlot) {
         int paramCount = type.parameterCount();
@@ -480,12 +438,9 @@ public class LogWeaver extends AbstractMojo {
             for (int i = 0; i < paramCount; i++) {
                 cb.dup();
                 cb.ldc(i);
-                cb.aload(i);   // every parameter is an object (boxed) or an array
+                cb.aload(i);
                 if (i == varargsSlot) {
                     ClassDesc arrType = type.parameterType(i);
-                    // Pick the matching Arrays.toString overload:
-                    //   primitive component  → exact array descriptor (e.g. ([I)Ljava/lang/String;)
-                    //   reference component  → (Object[])  — String[] etc. flow in via array covariance
                     ClassDesc atsParamType = arrType.componentType().isPrimitive()
                             ? arrType
                             : CD_Object.arrayType();
@@ -501,20 +456,6 @@ public class LogWeaver extends AbstractMojo {
         }));
     }
 
-    /**
-     * Emits the per-class {@link #VA_HELPER_NAME} method:
-     * <pre>{@code
-     * private static String $logweaver$va(String s) {
-     *     int len = s.length();
-     *     if (len < 2 || s.charAt(0) != '[') return s;
-     *     return s.substring(1, len - 1);
-     * }
-     * }</pre>
-     * Input is always {@link java.util.Arrays#toString} output, so the
-     * {@code "[…]"} prefix/suffix is the only thing to strip; the {@code "null"}
-     * literal (returned by {@code Arrays.toString} for a {@code null} array)
-     * and any unexpected non-bracketed input are passed through unchanged.
-     */
     private static void emitVaHelper(ClassBuilder clb) {
         clb.withMethod(VA_HELPER_NAME,
                 MethodTypeDesc.of(CD_String, CD_String),
@@ -522,24 +463,20 @@ public class LogWeaver extends AbstractMojo {
                 mb -> mb.withCode(cb -> {
                     Label returnAsIs = cb.newLabel();
 
-                    // int len = s.length();           — local 1
                     cb.aload(0);
                     cb.invokevirtual(CD_String, "length", MethodTypeDesc.of(CD_int));
                     cb.istore(1);
 
-                    // if (len < 2) return s;
                     cb.iload(1);
                     cb.iconst_2();
                     cb.if_icmplt(returnAsIs);
 
-                    // if (s.charAt(0) != '[') return s;
                     cb.aload(0);
                     cb.iconst_0();
                     cb.invokevirtual(CD_String, "charAt", MethodTypeDesc.of(CD_char, CD_int));
                     cb.bipush((byte) '[');
                     cb.if_icmpne(returnAsIs);
 
-                    // return s.substring(1, len - 1);
                     cb.aload(0);
                     cb.iconst_1();
                     cb.iload(1);
@@ -555,11 +492,6 @@ public class LogWeaver extends AbstractMojo {
                 }));
     }
 
-    /**
-     * Deterministic name for the synthetic format helper. Includes a hash of
-     * the method's descriptor so overloaded methods produce distinct helpers
-     * and so already-woven methods can be detected on a re-run.
-     */
     private static String syntheticName(MethodModel mm) {
         return "lambda$logweaver$" + mm.methodName().stringValue() + "$" + descHash(mm);
     }
@@ -569,12 +501,12 @@ public class LogWeaver extends AbstractMojo {
     }
 
     // ── Annotation reading ───────────────────────────────────────────────────
-    private boolean hasLogAnnotation(MethodModel m) {
+    private static boolean hasLogAnnotation(MethodModel m) {
         return m.findAttribute(Attributes.runtimeVisibleAnnotations()).map(attr -> attr.annotations().stream().anyMatch(a -> a.classSymbol().equals(CD_Log))).orElse(false);
     }
 
-    private Optional<LogInfo> readLogAnnotation(MethodModel m) {
-        return m.findAttribute(Attributes.runtimeVisibleAnnotations()).flatMap(attr -> attr.annotations().stream().filter(a -> a.classSymbol().equals(CD_Log)).findFirst()).map(LogWeaver::extractLogInfo);
+    private static Optional<LogInfo> readLogAnnotation(MethodModel m) {
+        return m.findAttribute(Attributes.runtimeVisibleAnnotations()).flatMap(attr -> attr.annotations().stream().filter(a -> a.classSymbol().equals(CD_Log)).findFirst()).map(LogWeaverCore::extractLogInfo);
     }
 
     private static LogInfo extractLogInfo(Annotation ann) {
@@ -597,44 +529,11 @@ public class LogWeaver extends AbstractMojo {
         return new LogInfo(levelName, logReturn, exceptionLevelName);
     }
 
-    // ── @LogAll: scope pre-scan, reading, resolution ─────────────────────────
-
-    /**
-     * First pass: reads {@code module-info.class} and every {@code package-info.class}
-     * file and collects their respective {@code @LogAll} configurations.
-     */
-    private Scopes scanScopes(Path root) throws IOException {
-        List<Path> infoFiles;
-        try (var stream = Files.walk(root)) {
-            infoFiles = stream.filter(p -> {
-                String n = p.getFileName().toString();
-                return n.equals("module-info.class") || n.equals("package-info.class");
-            }).toList();
-        }
-
-        Optional<LogAllConfig> moduleConfig = Optional.empty();
-        Map<String, LogAllConfig> packageConfigs = new HashMap<>();
-
-        for (Path info : infoFiles) {
-            ClassModel cm = ClassFile.of().parse(Files.readAllBytes(info));
-            Optional<LogAllConfig> cfg = readLogAllConfig(cm);
-            if (cfg.isEmpty()) continue;
-
-            if (info.getFileName().toString().equals("module-info.class")) {
-                moduleConfig = cfg;
-            } else {
-                packageConfigs.put(cm.thisClass().asSymbol().packageName(), cfg.get());
-            }
-        }
-        return new Scopes(moduleConfig, Map.copyOf(packageConfigs));
-    }
-
-    private Optional<LogAllConfig> readLogAllConfig(ClassModel cm) {
-        return cm.findAttribute(Attributes.runtimeVisibleAnnotations()).flatMap(attr -> attr.annotations().stream().filter(a -> a.classSymbol().equals(CD_LogAll)).findFirst()).map(LogWeaver::extractLogAllConfig);
+    private static Optional<LogAllConfig> readLogAllConfigFromClass(ClassModel cm) {
+        return cm.findAttribute(Attributes.runtimeVisibleAnnotations()).flatMap(attr -> attr.annotations().stream().filter(a -> a.classSymbol().equals(CD_LogAll)).findFirst()).map(LogWeaverCore::extractLogAllConfig);
     }
 
     private static LogAllConfig extractLogAllConfig(Annotation ann) {
-        // Defaults from the annotation itself (loaded reflectively).
         int modifiers = LOG_ALL_DEFAULTS.modifiers();
         String levelName = LOG_ALL_DEFAULTS.levelName();
         String methodPattern = LOG_ALL_DEFAULTS.methodPattern();
@@ -690,7 +589,7 @@ public class LogWeaver extends AbstractMojo {
     }
 
     private static LogAllConfig loadLogAllDefaults() {
-        int modifiers = 0;        // "all visibilities"
+        int modifiers = 0;
         String levelName = "INFO";
         String methodPattern = ".*";
         try {
@@ -713,25 +612,14 @@ public class LogWeaver extends AbstractMojo {
         return new LogAllConfig(modifiers, levelName, methodPattern);
     }
 
-    /**
-     * Synthetic message for the entry log of a {@code @LogAll}-woven method or
-     * a {@code @Log} with empty {@code value()}:
-     * {@code "<SimpleClass>.<method>(%s, %s, ...)"} with one {@code %s} per parameter.
-     */
+    // ── Synthesized messages ─────────────────────────────────────────────────
+
     private static String synthesizeMessage(ClassDesc owner, MethodModel mm) {
         int paramCount = mm.methodTypeSymbol().parameterCount();
         String args = String.join(", ", Collections.nCopies(paramCount, "%s"));
         return owner.displayName() + "." + mm.methodName().stringValue() + "(" + args + ")";
     }
 
-    /**
-     * Synthetic message for the return log:
-     * <ul>
-     *   <li>void → {@code "<SimpleClass>.<method>(%s, %s) -> void"} (params)</li>
-     *   <li>non-void → {@code "<SimpleClass>.<method>(%s, %s) -> %s"}
-     *       (params, then the return value)</li>
-     * </ul>
-     */
     private static String synthesizeReturnMessage(ClassDesc owner, MethodModel mm, boolean isVoid) {
         int paramCount = mm.methodTypeSymbol().parameterCount();
         String args = String.join(", ", Collections.nCopies(paramCount, "%s"));
@@ -754,7 +642,7 @@ public class LogWeaver extends AbstractMojo {
         if (type.equals(CD_long)) return CD_Long;
         if (type.equals(CD_float)) return CD_Float;
         if (type.equals(CD_double)) return CD_Double;
-        return type; // already a reference type
+        return type;
     }
 
     private static void storeAt(CodeBuilder cb, ClassDesc type, int slot) {
@@ -781,49 +669,15 @@ public class LogWeaver extends AbstractMojo {
      * depending on {@code logReturn}), the {@code logReturn} toggle, and the
      * exception-handler level. Exception logging is always installed; setting
      * {@code exceptionLevel} to {@code "OFF"} makes the JDK discard the log
-     * call but does not change the bytecode shape (the catch is still in
-     * place and the throwable is still rethrown). The displayed message is
-     * always synthesized – see
-     * {@link #synthesizeMessage(ClassDesc, MethodModel)} and
-     * {@link #synthesizeReturnMessage(ClassDesc, MethodModel, boolean)}.
+     * call but does not change the bytecode shape.
      */
     record LogInfo(String levelName, boolean logReturn, String exceptionLevelName) {}
-
-    /**
-     * Configuration of a {@code @LogAll} annotation.
-     */
-    record LogAllConfig(int modifiers, String levelName, String methodPattern) {
-
-        /**
-         * Does this @LogAll configuration apply to this method?
-         */
-        boolean matches(MethodModel mm) {
-            String name = mm.methodName().stringValue();
-            if (name.equals("<init>") || name.equals("<clinit>")) return false;
-
-            int flags = mm.flags().flagsMask();
-            int skip = ClassFile.ACC_ABSTRACT | ClassFile.ACC_NATIVE | ClassFile.ACC_BRIDGE | ClassFile.ACC_SYNTHETIC;
-            if ((flags & skip) != 0) return false;
-
-            // modifiers == 0 is the sentinel meaning "all visibilities, including
-            // package-private". Otherwise OR semantics apply: at least one
-            // requested visibility bit must be set.
-            if (modifiers != 0 && (flags & modifiers) == 0) return false;
-
-            return Pattern.matches(methodPattern, name);
-        }
-    }
-
-    /**
-     * Pre-collected @LogAll defaults for modules and packages.
-     */
-    record Scopes(Optional<LogAllConfig> module, Map<String, LogAllConfig> byPackage) {}
 
     record ParamSlot(int slot, ClassDesc type) {
 
         static List<ParamSlot> of(MethodModel m, boolean isStatic) {
             var result = new ArrayList<ParamSlot>();
-            int slot = isStatic ? 0 : 1; // static: no this slot
+            int slot = isStatic ? 0 : 1;
             for (ClassDesc p : m.methodTypeSymbol().parameterList()) {
                 result.add(new ParamSlot(slot, p));
                 slot += (p.equals(CD_long) || p.equals(CD_double)) ? 2 : 1;
@@ -855,4 +709,3 @@ public class LogWeaver extends AbstractMojo {
         }
     }
 }
-test

@@ -1,12 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-
-    <properties>
-        <maven.compiler.source>25</maven.compiler.source>
-        <maven.compiler.target>25</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
 
     <parent>
         <groupId>io.github.ralfspoeth</groupId>
@@ -14,16 +10,17 @@
         <version>2.0.7</version>
     </parent>
 
-    <artifactId>log-weaver-maven-plugin</artifactId>
+    <artifactId>log-weaver</artifactId>
     <version>0.8-SNAPSHOT</version>
-    <packaging>maven-plugin</packaging>
+    <packaging>pom</packaging>
 
-    <name>Logging Weaver</name>
+    <name>Log Weaver (parent)</name>
     <description>
-        The project is used to weave
-        logging into classes
-        based on annotations defined
-        in the log-api.
+        Bytecode-level logging weaver driven by the Log/LogAll annotations from log-api.
+        Modules:
+        - log-weaver-core         : transformation engine (no build-tool dependencies)
+        - log-weaver-maven-plugin : @Mojo wrapping the core for the Maven build
+        - log-weaver-agent        : Java agent wrapping the core as a ClassFileTransformer
     </description>
 
     <url>https://github.com/ralfspoeth/log-weaver</url>
@@ -33,18 +30,55 @@
         <developerConnection>scm:git:https://github.com/ralfspoeth/log-weaver.git</developerConnection>
         <tag>HEAD</tag>
     </scm>
+
+    <properties>
+        <maven.compiler.source>25</maven.compiler.source>
+        <maven.compiler.target>25</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <modules>
+        <module>log-weaver-core</module>
+        <module>log-weaver-maven-plugin</module>
+        <module>log-weaver-agent</module>
+    </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.ralfspoeth</groupId>
+                <artifactId>log-api</artifactId>
+                <version>0.5</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>6.0.3</version>
+                <scope>import</scope>
+                <type>pom</type>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <redirectTestOutputToFile>true</redirectTestOutputToFile>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
-            <!--  plugin plugin -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-plugin-plugin</artifactId>
-                <version>3.15.2</version>
-                <configuration>
-                    <goalPrefix>weaver</goalPrefix>
-                </configuration>
-            </plugin>
-            <!-- sonatype publishing -->
+            <!-- inherited release plumbing from plumbum stays in place -->
             <plugin>
                 <groupId>org.sonatype.plugins</groupId>
                 <artifactId>nexus-staging-maven-plugin</artifactId>
@@ -57,62 +91,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-release-plugin</artifactId>
             </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-javadoc-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-source-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <redirectTestOutputToFile>true</redirectTestOutputToFile>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.junit</groupId>
-                <artifactId>junit-bom</artifactId>
-                <version>6.0.3</version>
-                <scope>import</scope>
-                <type>pom</type>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
-    <dependencies>
-        <dependency>
-            <groupId>io.github.ralfspoeth</groupId>
-            <artifactId>log-api</artifactId>
-            <version>0.5</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.maven</groupId>
-            <artifactId>maven-plugin-api</artifactId>
-            <version>3.9.15</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.maven.plugin-tools</groupId>
-            <artifactId>maven-plugin-annotations</artifactId>
-            <version>3.15.2</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.maven</groupId>
-            <artifactId>maven-core</artifactId>
-            <version>3.9.15</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-api</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
 </project>
