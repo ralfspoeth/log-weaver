@@ -50,14 +50,6 @@ public class LogWeaver extends AbstractMojo {
     private static final ClassDesc CD_LogAll = ClassDesc.of("io.github.ralfspoeth.log.api.LogAll");
 
     /**
-     * Sentinel level meaning "exception logging is disabled". Stored as the
-     * string {@code "OFF"} since {@link System.Logger.Level} can never be
-     * {@code null} in an annotation declaration; users default
-     * {@code exceptionLevel} to {@link System.Logger.Level#OFF}.
-     */
-    private static final String OFF = "OFF";
-
-    /**
      * Synthetic per-class field that holds the {@link System.Logger} instance.
      */
     static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
@@ -231,9 +223,10 @@ public class LogWeaver extends AbstractMojo {
         if (methodLog.isPresent()) return methodLog;
 
         if (effectiveAll.isPresent() && effectiveAll.get().matches(mm)) {
-            // @LogAll only drives the entry log – it does not enable
-            // return/exception logging (those are method-level decisions).
-            return Optional.of(new LogInfo(effectiveAll.get().levelName(), false, OFF));
+            // @LogAll only drives the entry log; the exception handler is
+            // installed at the @Log default exception level (WARNING in 0.5).
+            return Optional.of(new LogInfo(effectiveAll.get().levelName(), false,
+                    LOG_DEFAULTS.exceptionLevelName()));
         }
         return Optional.empty();
     }
@@ -241,112 +234,100 @@ public class LogWeaver extends AbstractMojo {
     /**
      * Rewrites the annotated method with:
      * <ol>
-     *   <li>An entry log prologue (lazy {@link java.util.function.Supplier} via
-     *       {@code invokedynamic}) using the {@code level()} of the {@code @Log}
-     *       annotation.</li>
-     *   <li>If {@code logReturn() == true}: a return log (at the same level as
-     *       the entry log) emitted before each {@link ReturnInstruction},
-     *       capturing the parameters and (for non-void methods) the return
-     *       value.</li>
-     *   <li>If {@code exceptionLevel != OFF}: a {@link Throwable} catch around
-     *       the body that calls
+     *   <li>Exactly one supplier-based log call — entry vs. return is
+     *       mutually exclusive:
+     *       <ul>
+     *         <li>{@code logReturn() == false} (the default): a single entry
+     *             log before the body, capturing the (boxed) parameters.</li>
+     *         <li>{@code logReturn() == true}: a single return log emitted
+     *             before each {@link ReturnInstruction}, capturing the
+     *             parameters and (for non-void methods) the return value.</li>
+     *       </ul>
+     *       Both use the {@code level()} of the {@code @Log} annotation and
+     *       a lazy {@link java.util.function.Supplier} built via
+     *       {@code invokedynamic}.</li>
+     *   <li>An always-on {@link Throwable} catch around the body that calls
      *       {@code logger.log(exceptionLevel, t.getMessage(), t)} and
-     *       re-throws.</li>
+     *       re-throws. {@code exceptionLevel} defaults to {@code WARNING}
+     *       (taken from {@code @Log}'s reflective defaults).</li>
      * </ol>
-     * The {@code @Log} annotation is stripped after weaving so a second pass is
-     * a no-op.
+     * Only one synthetic helper method is generated per woven method — its
+     * shape (and the format string it carries) reflects which of entry-log or
+     * return-log was emitted. The {@code @Log} annotation is stripped after
+     * weaving so a second pass is a no-op.
      */
     private void weaveMethod(ClassBuilder clb, MethodModel mm, LogInfo info, ClassDesc owner) {
         boolean isStatic = mm.flags().has(AccessFlag.STATIC);
         List<ParamSlot> params = ParamSlot.of(mm, isStatic);
         List<ClassDesc> implParams = params.stream().map(p -> p.isPrimitive() ? p.boxed() : p.type()).toList();
 
-        // Entry helper: (boxedP1, boxedP2, ...) -> String
-        String entryHelperName = syntheticName(mm);
-        MethodTypeDesc entryHelperType = MethodTypeDesc.of(CD_String, implParams);
-        DynamicCallSiteDesc entryIndy = supplierIndy(owner, entryHelperName, entryHelperType, implParams);
-
         ClassDesc returnType = mm.methodTypeSymbol().returnType();
         boolean isVoid = returnType.equals(CD_void);
-
         boolean logReturn = info.logReturn();
-        boolean logException = !OFF.equals(info.exceptionLevelName());
 
-        // Return helper: (boxedP1, ..., boxedReturn?) -> String
-        // Captures: parameters first, then (if non-void) the boxed return value.
-        String returnHelperName = null;
-        DynamicCallSiteDesc returnIndy = null;
-        MethodTypeDesc returnHelperType = null;
-        String returnMessage = null;
+        // Single synthetic helper. The name is deterministic (and shared with
+        // the "already woven?" check), but the shape and the message string
+        // depend on whether we're emitting an entry log or a return log.
+        String helperName = syntheticName(mm);
+        List<ClassDesc> captureTypes;
+        String message;
         if (logReturn) {
-            List<ClassDesc> retCaptureTypes = new ArrayList<>(implParams);
-            if (!isVoid) retCaptureTypes.add(boxOf(returnType));
-            returnHelperName = "lambda$logweaver$" + mm.methodName().stringValue() + "$ret$" + descHash(mm);
-            returnHelperType = MethodTypeDesc.of(CD_String, retCaptureTypes);
-            returnIndy = supplierIndy(owner, returnHelperName, returnHelperType, retCaptureTypes);
-            returnMessage = synthesizeReturnMessage(owner, mm, isVoid);
+            captureTypes = new ArrayList<>(implParams);
+            if (!isVoid) captureTypes.add(boxOf(returnType));
+            message = synthesizeReturnMessage(owner, mm, isVoid);
+        } else {
+            captureTypes = implParams;
+            message = synthesizeMessage(owner, mm);
         }
+        MethodTypeDesc helperType = MethodTypeDesc.of(CD_String, captureTypes);
+        DynamicCallSiteDesc indy = supplierIndy(owner, helperName, helperType, captureTypes);
 
-        // Local-slot allocation for the return value and the throwable. Both
-        // sit *above* the method's original max_locals so they cannot collide
-        // with any local already used by the body.
+        // Local-slot allocation for the return value (logReturn case) and the
+        // throwable. Both sit *above* the method's original max_locals so they
+        // cannot collide with any local already used by the body.
         int origMaxLocals = mm.findAttribute(Attributes.code()).map(CodeAttribute::maxLocals).orElse(0);
         int resultSlots = (logReturn && !isVoid) ? slotWidth(returnType) : 0;
         int throwableSlot = origMaxLocals + resultSlots;
 
-        // Captures used by both the closures below.
-        final DynamicCallSiteDesc returnIndyFinal = returnIndy;
-
         clb.transformMethod(mm, (mb, mElement) -> {
             if (mElement instanceof CodeModel code) {
                 mb.withCode(cb -> {
-                    // ── Entry log ───────────────────────────────────────────
-                    cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
-                    cb.getstatic(CD_Level, info.levelName(), CD_Level);
-                    for (ParamSlot ps : params) {
-                        ps.load(cb);
-                        if (ps.isPrimitive()) {
-                            cb.invokestatic(ps.boxed(), "valueOf", MethodTypeDesc.of(ps.boxed(), ps.type()));
-                        }
+                    Label tryStart = cb.newLabel();
+                    Label tryEnd = cb.newLabel();
+                    Label handler = cb.newLabel();
+
+                    cb.labelBinding(tryStart);
+
+                    // ── Entry log (params only) when not capturing the return ──
+                    if (!logReturn) {
+                        emitParamLog(cb, owner, info.levelName(), params, indy);
                     }
-                    cb.invokedynamic(entryIndy);
-                    cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
 
-                    // ── Body, optionally wrapped in try/catch ───────────────
-                    Label tryStart = logException ? cb.newLabel() : null;
-                    Label tryEnd = logException ? cb.newLabel() : null;
-                    Label handler = logException ? cb.newLabel() : null;
-
-                    if (logException) cb.labelBinding(tryStart);
-
-                    // Original code, with each ReturnInstruction preceded by a
-                    // return-log emission.
+                    // ── Body, optionally with each ReturnInstruction preceded
+                    //    by a return-log emission ──
                     code.forEach(element -> {
                         if (logReturn && element instanceof ReturnInstruction) {
-                            // Return log re-uses the entry-log level.
                             emitReturnLog(cb, owner, info.levelName(), params,
-                                    returnType, isVoid, origMaxLocals, returnIndyFinal);
+                                    returnType, isVoid, origMaxLocals, indy);
                         }
                         cb.with(element);
                     });
 
-                    if (logException) {
-                        cb.labelBinding(tryEnd);
+                    cb.labelBinding(tryEnd);
 
-                        // Handler: log + rethrow.
-                        cb.labelBinding(handler);
-                        cb.astore(throwableSlot);
-                        cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
-                        cb.getstatic(CD_Level, info.exceptionLevelName(), CD_Level);
-                        cb.aload(throwableSlot);
-                        cb.invokevirtual(CD_Throwable, "getMessage", MethodTypeDesc.of(CD_String));
-                        cb.aload(throwableSlot);
-                        cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_String, CD_Throwable));
-                        cb.aload(throwableSlot);
-                        cb.athrow();
+                    // ── Always-on Throwable handler: log + rethrow ──
+                    cb.labelBinding(handler);
+                    cb.astore(throwableSlot);
+                    cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
+                    cb.getstatic(CD_Level, info.exceptionLevelName(), CD_Level);
+                    cb.aload(throwableSlot);
+                    cb.invokevirtual(CD_Throwable, "getMessage", MethodTypeDesc.of(CD_String));
+                    cb.aload(throwableSlot);
+                    cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_String, CD_Throwable));
+                    cb.aload(throwableSlot);
+                    cb.athrow();
 
-                        cb.exceptionCatch(tryStart, tryEnd, handler, CD_Throwable);
-                    }
+                    cb.exceptionCatch(tryStart, tryEnd, handler, CD_Throwable);
                 });
             } else if (mElement instanceof RuntimeVisibleAnnotationsAttribute attrs) {
                 List<Annotation> kept = attrs.annotations().stream().filter(a -> !a.classSymbol().equals(CD_Log)).toList();
@@ -359,12 +340,31 @@ public class LogWeaver extends AbstractMojo {
             }
         });
 
-        // Append the synthetic format helpers. The entry message is always
-        // synthesized – @Log no longer carries a value() attribute.
-        emitFormatHelper(clb, entryHelperName, entryHelperType, synthesizeMessage(owner, mm));
-        if (logReturn) {
-            emitFormatHelper(clb, returnHelperName, returnHelperType, returnMessage);
+        // One helper per woven method.
+        emitFormatHelper(clb, helperName, helperType, message);
+    }
+
+    /**
+     * Emits an entry-log call: loads LOGGER + Level, pushes each (boxed)
+     * parameter onto the stack, then builds the {@code Supplier<String>} via
+     * {@code invokedynamic} and calls
+     * {@link System.Logger#log(System.Logger.Level, java.util.function.Supplier)}.
+     */
+    private static void emitParamLog(CodeBuilder cb,
+                                     ClassDesc owner,
+                                     String levelName,
+                                     List<ParamSlot> params,
+                                     DynamicCallSiteDesc indy) {
+        cb.getstatic(owner, LOGGER_FIELD_NAME, CD_Logger);
+        cb.getstatic(CD_Level, levelName, CD_Level);
+        for (ParamSlot ps : params) {
+            ps.load(cb);
+            if (ps.isPrimitive()) {
+                cb.invokestatic(ps.boxed(), "valueOf", MethodTypeDesc.of(ps.boxed(), ps.type()));
+            }
         }
+        cb.invokedynamic(indy);
+        cb.invokeinterface(CD_Logger, "log", MethodTypeDesc.of(CD_void, CD_Level, CD_Supplier));
     }
 
     /**
@@ -563,7 +563,9 @@ public class LogWeaver extends AbstractMojo {
     private static LogInfo loadLogDefaults() {
         String levelName = "INFO";
         boolean logReturn = false;
-        String exceptionLevelName = OFF;
+        // Fallback only kicks in if log-api is missing at plugin load time.
+        // Mirrors log-api 0.5's @Log default for exceptionLevel.
+        String exceptionLevelName = "WARNING";
         try {
             for (Method m : Class.forName("io.github.ralfspoeth.log.api.Log").getDeclaredMethods()) {
                 Object dv = m.getDefaultValue();
@@ -672,11 +674,15 @@ public class LogWeaver extends AbstractMojo {
 
     /**
      * Carries the three configurable fields of an {@code @Log} annotation:
-     * the entry-log level, the {@code logReturn} toggle (return-log uses the
-     * same level as entry), and the exception level. The exception level uses
-     * the literal string {@code "OFF"} as the "do-not-log" sentinel. The
-     * entry-log message itself is always synthesized – see
-     * {@link #synthesizeMessage(ClassDesc, MethodModel)}.
+     * the log level (used for either the entry log or the return log,
+     * depending on {@code logReturn}), the {@code logReturn} toggle, and the
+     * exception-handler level. Exception logging is always installed; setting
+     * {@code exceptionLevel} to {@code "OFF"} makes the JDK discard the log
+     * call but does not change the bytecode shape (the catch is still in
+     * place and the throwable is still rethrown). The displayed message is
+     * always synthesized – see
+     * {@link #synthesizeMessage(ClassDesc, MethodModel)} and
+     * {@link #synthesizeReturnMessage(ClassDesc, MethodModel, boolean)}.
      */
     record LogInfo(String levelName, boolean logReturn, String exceptionLevelName) {}
 

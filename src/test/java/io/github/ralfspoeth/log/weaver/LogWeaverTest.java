@@ -345,12 +345,8 @@ class LogWeaverTest {
     @Test
     void returnLogForVoidMethodEmitsHelperWithoutResultCapture(@TempDir Path tempDir) throws Exception {
         ClassDesc cd = ClassDesc.of("com.example.RetVoid");
-        // Pin exceptionLevel=OFF so this test stays independent of @Log's API-side default,
-        // which changed in log-api 0.5. Without this, the woven body would include a
-        // Throwable handler and the INVOKEINTERFACE count would be 3 instead of 2.
         Annotation logAnn = Annotation.of(LOG_CD,
-                AnnotationElement.of("logReturn", AnnotationValue.ofBoolean(true)),
-                AnnotationElement.of("exceptionLevel", AnnotationValue.ofEnum(LEVEL_CD, "OFF")));
+                AnnotationElement.of("logReturn", AnnotationValue.ofBoolean(true)));
 
         Path classFile = writeFixture(tempDir, cd,
                 "doIt", MethodTypeDesc.of(CD_void, STRING_CD), logAnn);
@@ -359,24 +355,25 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // Entry helper present
-        assertNotNull(findMethodByPrefix(cm, "lambda$logweaver$doIt$"));
-
-        // Return helper present, signature (String)String — no extra capture for void return.
-        MethodModel returnHelper = findMethodByPrefix(cm, "lambda$logweaver$doIt$ret$");
+        // Single helper – entry vs. return is mutually exclusive. With
+        // logReturn=true on a void method the helper captures only the
+        // (String) parameter, no extra slot for the return value.
+        MethodModel helper = findMethodByPrefix(cm, "lambda$logweaver$doIt$");
         assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
-                returnHelper.methodType().stringValue(),
+                helper.methodType().stringValue(),
                 "void return helper must capture only the parameters");
-        assertTrue(returnHelper.flags().has(AccessFlag.STATIC));
-        assertTrue(returnHelper.flags().has(AccessFlag.PRIVATE));
-        assertTrue(returnHelper.flags().has(AccessFlag.SYNTHETIC));
+        assertTrue(helper.flags().has(AccessFlag.STATIC));
+        assertTrue(helper.flags().has(AccessFlag.PRIVATE));
+        assertTrue(helper.flags().has(AccessFlag.SYNTHETIC));
 
-        // The woven method has TWO INVOKEDYNAMIC and TWO Logger.log calls (entry + return).
+        // Exactly ONE supplier-based log call (the return log) and exactly TWO
+        // Logger.log invocations: the supplier-based return log + the always-on
+        // throwable log in the catch handler.
         List<String> ops = opcodes(findMethod(cm, "doIt"));
-        assertEquals(2, ops.stream().filter("INVOKEDYNAMIC"::equals).count(),
-                "entry and return prologues each emit one INVOKEDYNAMIC");
+        assertEquals(1, ops.stream().filter("INVOKEDYNAMIC"::equals).count(),
+                "logReturn=true emits the return log only – no entry log");
         assertEquals(2, ops.stream().filter("INVOKEINTERFACE"::equals).count(),
-                "entry and return prologues each call Logger.log");
+                "return prologue + always-on Throwable handler each call Logger.log");
     }
 
     @Test
@@ -409,10 +406,11 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // Return helper signature: (Integer)String — int boxed.
-        MethodModel returnHelper = findMethodByPrefix(cm, "lambda$logweaver$five$ret$");
+        // Single helper, signature (Integer)String — int boxed return value,
+        // no parameters to capture for five().
+        MethodModel helper = findMethodByPrefix(cm, "lambda$logweaver$five$");
         assertEquals("(Ljava/lang/Integer;)Ljava/lang/String;",
-                returnHelper.methodType().stringValue(),
+                helper.methodType().stringValue(),
                 "non-void return helper must capture the boxed result");
 
         // Round-trip through the woven class: the original return value (5) must survive.
@@ -492,7 +490,7 @@ class LogWeaverTest {
     }
 
     @Test
-    void logReturnAndExceptionLevelCanCoexist(@TempDir Path tempDir) throws Exception {
+    void logReturnPlusExplicitExceptionLevel(@TempDir Path tempDir) throws Exception {
         ClassDesc cd = ClassDesc.of("com.example.Both");
         Annotation logAnn = Annotation.of(LOG_CD,
                 AnnotationElement.of("logReturn", AnnotationValue.ofBoolean(true)),
@@ -505,11 +503,12 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // Entry + return helper both present.
-        assertNotNull(findMethodByPrefix(cm, "lambda$logweaver$noop$"));
-        assertNotNull(findMethodByPrefix(cm, "lambda$logweaver$noop$ret$"));
+        // Single helper for the return log – entry vs. return is mutually exclusive.
+        MethodModel helper = findMethodByPrefix(cm, "lambda$logweaver$noop$");
+        assertEquals("()Ljava/lang/String;", helper.methodType().stringValue(),
+                "logReturn=true on void noop() captures nothing");
 
-        // Exception table has a Throwable handler.
+        // Always-on Throwable handler installed at the explicit ERROR level.
         ClassDesc throwableCd = ClassDesc.of("java.lang.Throwable");
         MethodModel noop = findMethod(cm, "noop");
         CodeAttribute code = noop.findAttribute(Attributes.code()).orElseThrow();
@@ -517,14 +516,16 @@ class LogWeaverTest {
                 .anyMatch(eh -> eh.catchType()
                         .map(ce -> ce.asSymbol().equals(throwableCd))
                         .orElse(false)));
+        assertTrue(fieldRefNames(noop, LEVEL_CD).contains("ERROR"),
+                "explicit exceptionLevel must override the WARNING default");
     }
 
     @Test
-    void defaultsEmitExceptionLoggingAtWarningButNoReturnLog(@TempDir Path tempDir) throws Exception {
+    void defaultsEmitEntryLogPlusExceptionHandlerAtWarning(@TempDir Path tempDir) throws Exception {
         ClassDesc cd = ClassDesc.of("com.example.PlainLog");
         // log-api 0.5 contract for a bare @Log:
-        //   logReturn      → false  (no return helper)
-        //   exceptionLevel → WARNING (Throwable handler installed)
+        //   logReturn      → false   → entry log only (no return capture)
+        //   exceptionLevel → WARNING → Throwable handler installed
         Annotation logAnn = Annotation.of(LOG_CD);
 
         Path classFile = writeFixture(tempDir, cd,
@@ -534,13 +535,22 @@ class LogWeaverTest {
 
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
-        // logReturn defaults to false → no return helper.
-        assertFalse(hasMethodWithPrefix(cm, "lambda$logweaver$greet$ret$"),
-                "logReturn=false (default) must not produce a return helper");
+        // The single helper has the entry-form shape: parameters only, no return capture.
+        MethodModel helper = findMethodByPrefix(cm, "lambda$logweaver$greet$");
+        assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
+                helper.methodType().stringValue(),
+                "logReturn=false (default) must produce an entry-form helper (params only)");
+
+        // Exactly one supplier-based log call (entry) + one throwable log call (handler).
+        MethodModel greet = findMethod(cm, "greet");
+        List<String> ops = opcodes(greet);
+        assertEquals(1, ops.stream().filter("INVOKEDYNAMIC"::equals).count(),
+                "logReturn=false emits the entry log only – no return log");
+        assertEquals(2, ops.stream().filter("INVOKEINTERFACE"::equals).count(),
+                "entry prologue + always-on Throwable handler each call Logger.log");
 
         // exceptionLevel defaults to WARNING → Throwable handler is installed.
         ClassDesc throwableCd = ClassDesc.of("java.lang.Throwable");
-        MethodModel greet = findMethod(cm, "greet");
         CodeAttribute code = greet.findAttribute(Attributes.code()).orElseThrow();
         assertTrue(code.exceptionHandlers().stream()
                         .anyMatch(eh -> eh.catchType()

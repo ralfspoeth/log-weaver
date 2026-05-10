@@ -24,13 +24,21 @@ in a third-party logging facade.
      is added (named after the class' fully-qualified name).
    - Either a fresh `<clinit>` is generated, or the existing one is prepended
      with `$logweaver$LOGGER = System.getLogger("<fqcn>");`.
-   - Each annotated method gets an entry-log prologue, optionally a return log
-     before every `XRETURN`, and optionally a `Throwable` catch that logs and
-     rethrows.
+   - Each annotated method gets exactly **one** parameter-aware log call —
+     entry vs. return is mutually exclusive:
+     - `logReturn = false` (the default): a single entry log before the body,
+       capturing the (boxed) parameters.
+     - `logReturn = true`: a single return log before each `XRETURN`,
+       capturing the parameters and (for non-void methods) the return value.
+   - On top of that, the body is **always** wrapped in a `Throwable` catch
+     that calls `logger.log(exceptionLevel, t.getMessage(), t)` and re-throws.
+     `exceptionLevel` defaults to `WARNING`; setting it to `OFF` keeps the
+     catch in place but lets the JDK discard the log call.
    - The `@Log` annotation is stripped after weaving, so a re-run is a no-op.
 
-Lazy formatting is preserved: every prologue builds a `Supplier<String>`
-through `invokedynamic` (`LambdaMetafactory.metafactory`) and calls
+Lazy formatting is preserved: the parameter-aware log call builds a
+`Supplier<String>` through `invokedynamic`
+(`LambdaMetafactory.metafactory`) and calls
 `Logger.log(Level, Supplier<String>)`. The `Supplier` captures the (boxed)
 parameters and only formats the message when the underlying handler decides
 the record is loggable.
@@ -83,17 +91,23 @@ is enough.
 ### `@Log` (per method)
 
 ```java
-@Log                                          // entry log at INFO,
-                                              // exception log at WARNING (0.5 default),
-                                              // no return log
+@Log                                          // entry log (params) at INFO;
+                                              // exception handler at WARNING
 String greet(String name) { … }
 
-@Log(level = ERROR, logReturn = true)         // entry + return log at ERROR
+@Log(level = ERROR, logReturn = true)         // return log (params + result)
+                                              // at ERROR; no entry log
 int compute(int x) { … }
 
-@Log(exceptionLevel = OFF)                    // entry log only — no try/catch
+@Log(exceptionLevel = OFF)                    // entry log; the catch is still
+                                              // installed but Level.OFF makes
+                                              // the JDK drop the log record
 void fireAndForget() { … }
 ```
+
+Entry vs. return is mutually exclusive: `logReturn = true` *replaces* the
+entry log with a return log rather than emitting both. The exception
+handler is always installed.
 
 The values are resolved at weave-time by reading the annotation class'
 `getDefaultValue()`s, so the table above mirrors whatever `log-api` ships.
@@ -116,8 +130,10 @@ package com.example.app;
 module com.example.app { … }
 ```
 
-`@LogAll` only drives the **entry log**. To turn return-logging or
-exception-logging on for a method, place an explicit `@Log` on that method.
+`@LogAll` drives the **entry log** at its declared level. The
+always-on exception handler is installed too, at the `@Log` default
+level (WARNING). To switch to return-logging on a specific method, or to
+override the exception level, place an explicit `@Log` on that method.
 
 #### Resolution order
 
@@ -137,21 +153,26 @@ A method "matches" a `@LogAll` when:
 
 ## Generated artifacts
 
-For a method `pkg.Cls.foo(int, String) -> int` with `@Log(logReturn = true)`,
+For `pkg.Cls.foo(int, String) -> int` with `@Log(logReturn = true)`,
 the woven class contains:
 
 | element | name | shape |
 |---|---|---|
 | field | `$logweaver$LOGGER` | `private static final System.Logger` |
-| helper | `lambda$logweaver$foo$<hash>` | `(Integer, String) -> String` (entry message) |
-| helper | `lambda$logweaver$foo$ret$<hash>` | `(Integer, String, Integer) -> String` (return message) |
+| helper | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result) |
+
+For the same method declared as `@Log` (logReturn defaulting to false), the
+single helper would instead be `(Integer, String) -> String` and would
+format the entry message.
 
 Helper names include a hash of the method descriptor so overloads stay
 distinct, and so a re-run can detect "already woven" methods and skip them.
+There is exactly one helper per woven method.
 
 The default messages are synthesized as
-`<SimpleClassName>.<method>(%s, …) [-> %s]` — there is no per-method
-"message" attribute on `@Log`.
+`<SimpleClassName>.<method>(%s, …)` for entry logs and
+`<SimpleClassName>.<method>(%s, …) -> %s` (or `-> void`) for return logs —
+there is no per-method "message" attribute on `@Log`.
 
 ## Idempotency
 
