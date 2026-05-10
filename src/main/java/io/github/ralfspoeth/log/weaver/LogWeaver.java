@@ -46,6 +46,7 @@ public class LogWeaver extends AbstractMojo {
     private static final ClassDesc CD_Supplier = ClassDesc.of("java.util.function.Supplier");
     private static final ClassDesc CD_ObjectArray = CD_Object.arrayType();
     private static final ClassDesc CD_Throwable = ClassDesc.of("java.lang.Throwable");
+    private static final ClassDesc CD_Arrays = ClassDesc.of("java.util.Arrays");
     private static final ClassDesc CD_Log = ClassDesc.of("io.github.ralfspoeth.log.api.Log");
     private static final ClassDesc CD_LogAll = ClassDesc.of("io.github.ralfspoeth.log.api.LogAll");
 
@@ -53,6 +54,14 @@ public class LogWeaver extends AbstractMojo {
      * Synthetic per-class field that holds the {@link System.Logger} instance.
      */
     static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
+
+    /**
+     * Synthetic per-class helper that strips the leading {@code '['} and
+     * trailing {@code ']'} from {@code Arrays.toString(...)} output, so a
+     * varargs argument shows up in the log message as comma-separated
+     * elements rather than as the raw array's identity hash.
+     */
+    static final String VA_HELPER_NAME = "$logweaver$va";
 
     private static final DirectMethodHandleDesc LMF_BOOTSTRAP = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC,
             ClassDesc.of("java.lang.invoke.LambdaMetafactory"),
@@ -149,6 +158,13 @@ public class LogWeaver extends AbstractMojo {
 
         boolean hasClinit = cm.methods().stream().anyMatch(m -> m.methodName().stringValue().equals("<clinit>"));
         boolean hasLoggerField = cm.fields().stream().anyMatch(f -> f.fieldName().stringValue().equals(LOGGER_FIELD_NAME));
+        boolean hasVaHelper = cm.methods().stream().anyMatch(m -> m.methodName().stringValue().equals(VA_HELPER_NAME));
+        boolean anyVarargsToWeave = cm.methods().stream()
+                .filter(notYetWoven)
+                .filter(mm -> mm.flags().has(AccessFlag.VARARGS))
+                .anyMatch(mm -> hasLogAnnotation(mm)
+                        || (effectiveAll.isPresent() && effectiveAll.get().matches(mm)));
+        boolean needsVaHelper = anyVarargsToWeave && !hasVaHelper;
         String loggerName = (owner.packageName().isEmpty() ? "" : owner.packageName() + ".") + owner.displayName();
 
         // ClassBuilder additions outside of an existing element's iteration are
@@ -168,6 +184,9 @@ public class LogWeaver extends AbstractMojo {
                         emitLoggerInit(cb, owner, loggerName);
                         cb.return_();
                     }));
+                }
+                if (needsVaHelper) {
+                    emitVaHelper(clb);
                 }
             }
 
@@ -265,6 +284,16 @@ public class LogWeaver extends AbstractMojo {
         boolean isVoid = returnType.equals(CD_void);
         boolean logReturn = info.logReturn();
 
+        // Varargs methods carry ACC_VARARGS; the last formal parameter is the
+        // implicit array. We make that slot show up as comma-separated elements
+        // in the log message rather than as the array's identity hash. The
+        // captured-arg index of the varargs slot is the same in both helper
+        // shapes (entry: params; return: params + return), since the return
+        // value is appended *after* the params.
+        int varargsSlot = mm.flags().has(AccessFlag.VARARGS) && !params.isEmpty()
+                ? params.size() - 1
+                : -1;
+
         // Single synthetic helper. The name is deterministic (and shared with
         // the "already woven?" check), but the shape and the message string
         // depend on whether we're emitting an entry log or a return log.
@@ -341,7 +370,7 @@ public class LogWeaver extends AbstractMojo {
         });
 
         // One helper per woven method.
-        emitFormatHelper(clb, helperName, helperType, message);
+        emitFormatHelper(clb, helperName, helperType, message, owner, varargsSlot);
     }
 
     /**
@@ -434,8 +463,15 @@ public class LogWeaver extends AbstractMojo {
      * Emits a synthetic helper method that returns
      * {@code message.formatted(arg0, arg1, ...)} — one positional argument per
      * (boxed) parameter slot.
+     *
+     * <p>If {@code varargsSlot >= 0}, the argument at that slot is a Java
+     * varargs array: instead of pushing the array reference into the format
+     * args (which would render as {@code [Ljava/lang/String;@…}), we push
+     * {@code $logweaver$va(Arrays.toString(arr))} — i.e. its elements
+     * comma-separated, without the surrounding {@code [} / {@code ]}.
      */
-    private static void emitFormatHelper(ClassBuilder clb, String name, MethodTypeDesc type, String message) {
+    private static void emitFormatHelper(ClassBuilder clb, String name, MethodTypeDesc type,
+                                         String message, ClassDesc owner, int varargsSlot) {
         int paramCount = type.parameterCount();
         clb.withMethod(name, type, ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_SYNTHETIC, mb -> mb.withCode(cb -> {
             cb.ldc(message);
@@ -444,12 +480,79 @@ public class LogWeaver extends AbstractMojo {
             for (int i = 0; i < paramCount; i++) {
                 cb.dup();
                 cb.ldc(i);
-                cb.aload(i);   // every parameter is an object (boxed)
+                cb.aload(i);   // every parameter is an object (boxed) or an array
+                if (i == varargsSlot) {
+                    ClassDesc arrType = type.parameterType(i);
+                    // Pick the matching Arrays.toString overload:
+                    //   primitive component  → exact array descriptor (e.g. ([I)Ljava/lang/String;)
+                    //   reference component  → (Object[])  — String[] etc. flow in via array covariance
+                    ClassDesc atsParamType = arrType.componentType().isPrimitive()
+                            ? arrType
+                            : CD_Object.arrayType();
+                    cb.invokestatic(CD_Arrays, "toString",
+                            MethodTypeDesc.of(CD_String, atsParamType));
+                    cb.invokestatic(owner, VA_HELPER_NAME,
+                            MethodTypeDesc.of(CD_String, CD_String));
+                }
                 cb.aastore();
             }
             cb.invokevirtual(CD_String, "formatted", MethodTypeDesc.of(CD_String, CD_ObjectArray));
             cb.areturn();
         }));
+    }
+
+    /**
+     * Emits the per-class {@link #VA_HELPER_NAME} method:
+     * <pre>{@code
+     * private static String $logweaver$va(String s) {
+     *     int len = s.length();
+     *     if (len < 2 || s.charAt(0) != '[') return s;
+     *     return s.substring(1, len - 1);
+     * }
+     * }</pre>
+     * Input is always {@link java.util.Arrays#toString} output, so the
+     * {@code "[…]"} prefix/suffix is the only thing to strip; the {@code "null"}
+     * literal (returned by {@code Arrays.toString} for a {@code null} array)
+     * and any unexpected non-bracketed input are passed through unchanged.
+     */
+    private static void emitVaHelper(ClassBuilder clb) {
+        clb.withMethod(VA_HELPER_NAME,
+                MethodTypeDesc.of(CD_String, CD_String),
+                ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_SYNTHETIC,
+                mb -> mb.withCode(cb -> {
+                    Label returnAsIs = cb.newLabel();
+
+                    // int len = s.length();           — local 1
+                    cb.aload(0);
+                    cb.invokevirtual(CD_String, "length", MethodTypeDesc.of(CD_int));
+                    cb.istore(1);
+
+                    // if (len < 2) return s;
+                    cb.iload(1);
+                    cb.iconst_2();
+                    cb.if_icmplt(returnAsIs);
+
+                    // if (s.charAt(0) != '[') return s;
+                    cb.aload(0);
+                    cb.iconst_0();
+                    cb.invokevirtual(CD_String, "charAt", MethodTypeDesc.of(CD_char, CD_int));
+                    cb.bipush((byte) '[');
+                    cb.if_icmpne(returnAsIs);
+
+                    // return s.substring(1, len - 1);
+                    cb.aload(0);
+                    cb.iconst_1();
+                    cb.iload(1);
+                    cb.iconst_1();
+                    cb.isub();
+                    cb.invokevirtual(CD_String, "substring",
+                            MethodTypeDesc.of(CD_String, CD_int, CD_int));
+                    cb.areturn();
+
+                    cb.labelBinding(returnAsIs);
+                    cb.aload(0);
+                    cb.areturn();
+                }));
     }
 
     /**

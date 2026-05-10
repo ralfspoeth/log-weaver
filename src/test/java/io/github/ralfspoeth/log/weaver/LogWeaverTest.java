@@ -563,6 +563,172 @@ class LogWeaverTest {
                 "default exceptionLevel must be WARNING");
     }
 
+    // ── Varargs ──────────────────────────────────────────────────────────────
+
+    @Test
+    void varargsAreLoggedAsCommaSeparatedElements(@TempDir Path tempDir) throws Exception {
+        ClassDesc cd = ClassDesc.of("com.example.Va");
+        Annotation logAnn = Annotation.of(LOG_CD);
+
+        ClassDesc strArr = STRING_CD.arrayType();
+        byte[] bytes = ClassFile.of().build(cd, clb -> {
+            clb.withSuperclass(OBJECT_CD);
+            clb.withMethodBody("<init>", MethodTypeDesc.of(CD_void), ClassFile.ACC_PUBLIC, cb -> {
+                cb.aload(0);
+                cb.invokespecial(OBJECT_CD, "<init>", MethodTypeDesc.of(CD_void));
+                cb.return_();
+            });
+            // public void greet(String... names) {}
+            clb.withMethod("greet", MethodTypeDesc.of(CD_void, strArr),
+                    ClassFile.ACC_PUBLIC | ClassFile.ACC_VARARGS, mb -> {
+                        mb.with(RuntimeVisibleAnnotationsAttribute.of(logAnn));
+                        mb.withCode(CodeBuilder::return_);
+                    });
+        });
+        Path classFile = tempDir.resolve("com/example/Va.class");
+        Files.createDirectories(classFile.getParent());
+        Files.write(classFile, bytes);
+
+        runWeaver(tempDir);
+
+        ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
+
+        // The per-class strip helper is present.
+        MethodModel vaHelper = findMethod(cm, LogWeaver.VA_HELPER_NAME);
+        assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
+                vaHelper.methodType().stringValue(),
+                "$logweaver$va must be (String)String");
+
+        // The format helper for greet keeps its array-typed parameter so that
+        // Arrays.toString chooses the right overload.
+        MethodModel format = findMethodByPrefix(cm, "lambda$logweaver$greet$");
+        assertEquals("([Ljava/lang/String;)Ljava/lang/String;",
+                format.methodType().stringValue(),
+                "varargs format helper must capture the raw array");
+
+        // Drive the format helper directly via reflection and assert the
+        // produced log message has elements joined, no brackets, no array hash.
+        try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
+            var klass = cl.loadClass("com.example.Va");
+            java.lang.reflect.Method m = java.util.Arrays.stream(klass.getDeclaredMethods())
+                    .filter(mm -> mm.getName().startsWith("lambda$logweaver$greet$"))
+                    .findFirst()
+                    .orElseThrow();
+            m.setAccessible(true);
+
+            assertEquals("Va.greet(alice, bob)",
+                    m.invoke(null, (Object) new String[]{"alice", "bob"}),
+                    "two-element varargs must render as joined elements");
+            assertEquals("Va.greet(alice)",
+                    m.invoke(null, (Object) new String[]{"alice"}),
+                    "single-element varargs must render as the element alone");
+            assertEquals("Va.greet()",
+                    m.invoke(null, (Object) new String[]{}),
+                    "empty varargs must render as an empty argument list");
+        }
+    }
+
+    @Test
+    void primitiveVarargsUseTheMatchingArraysToStringOverload(@TempDir Path tempDir) throws Exception {
+        ClassDesc cd = ClassDesc.of("com.example.IntVa");
+        Annotation logAnn = Annotation.of(LOG_CD);
+
+        ClassDesc intArr = ClassDesc.ofDescriptor("[I");
+        byte[] bytes = ClassFile.of().build(cd, clb -> {
+            clb.withSuperclass(OBJECT_CD);
+            clb.withMethodBody("<init>", MethodTypeDesc.of(CD_void), ClassFile.ACC_PUBLIC, cb -> {
+                cb.aload(0);
+                cb.invokespecial(OBJECT_CD, "<init>", MethodTypeDesc.of(CD_void));
+                cb.return_();
+            });
+            // public void sum(int... xs) {}
+            clb.withMethod("sum", MethodTypeDesc.of(CD_void, intArr),
+                    ClassFile.ACC_PUBLIC | ClassFile.ACC_VARARGS, mb -> {
+                        mb.with(RuntimeVisibleAnnotationsAttribute.of(logAnn));
+                        mb.withCode(CodeBuilder::return_);
+                    });
+        });
+        Path classFile = tempDir.resolve("com/example/IntVa.class");
+        Files.createDirectories(classFile.getParent());
+        Files.write(classFile, bytes);
+
+        runWeaver(tempDir);
+
+        try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
+            var klass = cl.loadClass("com.example.IntVa");
+            java.lang.reflect.Method m = java.util.Arrays.stream(klass.getDeclaredMethods())
+                    .filter(mm -> mm.getName().startsWith("lambda$logweaver$sum$"))
+                    .findFirst()
+                    .orElseThrow();
+            m.setAccessible(true);
+
+            assertEquals("IntVa.sum(1, 2, 3)",
+                    m.invoke(null, (Object) new int[]{1, 2, 3}),
+                    "primitive varargs must use Arrays.toString(int[])");
+        }
+    }
+
+    @Test
+    void varargsTrailingPositionAfterRegularParam(@TempDir Path tempDir) throws Exception {
+        ClassDesc cd = ClassDesc.of("com.example.Mixed");
+        Annotation logAnn = Annotation.of(LOG_CD);
+
+        ClassDesc strArr = STRING_CD.arrayType();
+        byte[] bytes = ClassFile.of().build(cd, clb -> {
+            clb.withSuperclass(OBJECT_CD);
+            clb.withMethodBody("<init>", MethodTypeDesc.of(CD_void), ClassFile.ACC_PUBLIC, cb -> {
+                cb.aload(0);
+                cb.invokespecial(OBJECT_CD, "<init>", MethodTypeDesc.of(CD_void));
+                cb.return_();
+            });
+            // public void log(int prefix, String... rest) {}
+            clb.withMethod("log", MethodTypeDesc.of(CD_void, CD_int, strArr),
+                    ClassFile.ACC_PUBLIC | ClassFile.ACC_VARARGS, mb -> {
+                        mb.with(RuntimeVisibleAnnotationsAttribute.of(logAnn));
+                        mb.withCode(CodeBuilder::return_);
+                    });
+        });
+        Path classFile = tempDir.resolve("com/example/Mixed.class");
+        Files.createDirectories(classFile.getParent());
+        Files.write(classFile, bytes);
+
+        runWeaver(tempDir);
+
+        try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
+            var klass = cl.loadClass("com.example.Mixed");
+            java.lang.reflect.Method m = java.util.Arrays.stream(klass.getDeclaredMethods())
+                    .filter(mm -> mm.getName().startsWith("lambda$logweaver$log$"))
+                    .findFirst()
+                    .orElseThrow();
+            m.setAccessible(true);
+
+            assertEquals("Mixed.log(7, a, b)",
+                    m.invoke(null, 7, new String[]{"a", "b"}),
+                    "regular param + non-empty varargs renders both inline");
+            // Empty varargs leaves a trailing ", " — accepted as a minor cosmetic
+            // trade-off for the simpler single-helper design.
+            assertEquals("Mixed.log(7, )",
+                    m.invoke(null, 7, new String[]{}),
+                    "empty varargs after a regular param leaves a trailing comma");
+        }
+    }
+
+    @Test
+    void nonVarargsClassesGetNoVaHelper(@TempDir Path tempDir) throws Exception {
+        ClassDesc cd = ClassDesc.of("com.example.Plain");
+        Annotation logAnn = Annotation.of(LOG_CD);
+
+        Path classFile = writeFixture(tempDir, cd,
+                "greet", MethodTypeDesc.of(CD_void, STRING_CD), logAnn);
+
+        runWeaver(tempDir);
+
+        ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
+        assertFalse(cm.methods().stream()
+                        .anyMatch(m -> m.methodName().stringValue().equals(LogWeaver.VA_HELPER_NAME)),
+                "$logweaver$va must only be added to classes that actually have varargs methods");
+    }
+
     // ── Idempotency ──────────────────────────────────────────────────────────
 
     @Test

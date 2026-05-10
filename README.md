@@ -43,6 +43,14 @@ Lazy formatting is preserved: the parameter-aware log call builds a
 parameters and only formats the message when the underlying handler decides
 the record is loggable.
 
+Varargs are unpacked into individual elements rather than rendered as the
+array's identity hash. A class with any varargs methods picks up a small
+synthetic helper `$logweaver$va(String) -> String` that strips the
+surrounding `[`/`]` from `Arrays.toString` output, so
+`foo(2, "a", "b")` shows up as `Cls.foo(2, a, b)` in the log message.
+A `foo(2)` call (empty varargs after a regular param) currently leaves a
+trailing `, ` in the message.
+
 ## Requirements
 
 - JDK 25 (the plugin uses the stabilised `java.lang.classfile` API).
@@ -160,6 +168,7 @@ the woven class contains:
 |---|---|---|
 | field | `$logweaver$LOGGER` | `private static final System.Logger` |
 | helper | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result) |
+| helper | `$logweaver$va` | `(String) -> String` — added once per class, only when at least one woven method is varargs |
 
 For the same method declared as `@Log` (logReturn defaulting to false), the
 single helper would instead be `(Integer, String) -> String` and would
