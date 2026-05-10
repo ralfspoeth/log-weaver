@@ -16,11 +16,42 @@ The project is a multi-module Maven build:
 | `log-weaver-core` | the transformation engine — no build-tool dependencies, embeddable |
 | `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes` |
 | `log-weaver-agent` | a Java agent that runs the core as a `ClassFileTransformer` at class-load time |
+| `log-weaver-bom` | Bill of Materials — import once, reference any of the above without specifying a version |
 
 The core is the single source of truth for the transformation; the Maven
-plugin and the agent are just glue around it. All four modules share the
+plugin and the agent are just glue around it. All modules share the
 same version and release together — `log-api`'s use outside this project is
 negligible, so co-versioning is simpler than keeping it on its own track.
+
+## BOM
+
+Import the BOM once to keep all log-weaver artifacts in sync:
+
+```xml
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.ralfspoeth</groupId>
+            <artifactId>log-weaver-bom</artifactId>
+            <version>0.9</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <!-- versionless: BOM provides it -->
+    <dependency>
+        <groupId>io.github.ralfspoeth</groupId>
+        <artifactId>log-api</artifactId>
+    </dependency>
+</dependencies>
+```
+
+The Maven plugin and the agent jar are also covered, so a `<plugin>` block
+or `-javaagent` reference can use the same managed version through
+`${log-weaver.version}` if you set one yourself.
 
 ## How it works
 
@@ -266,10 +297,12 @@ log-weaver/                              parent POM (packaging=pom)
 ├── log-weaver-maven-plugin/
 │   └── src/main/java/.../maven/
 │       └── WeaveMojo.java               @Mojo "weave" → LogWeaverCore.weaveDirectory
-└── log-weaver-agent/
-    └── src/main/java/.../agent/
-        └── LogWeaverAgent.java          premain + ClassFileTransformer
-                                         → LogWeaverCore.transformClass
+├── log-weaver-agent/
+│   └── src/main/java/.../agent/
+│       └── LogWeaverAgent.java          premain + ClassFileTransformer
+│                                        → LogWeaverCore.transformClass
+└── log-weaver-bom/
+    └── pom.xml                          dependencyManagement for all of the above
 ```
 
 Tests live in `log-weaver-core/src/test/...LogWeaverCoreTest.java`. They

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.ralfspoeth</groupId>
+        <artifactId>log-weaver</artifactId>
+        <version>0.10-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>log-weaver-bom</artifactId>
+    <packaging>pom</packaging>
+
+    <name>Log Weaver BOM</name>
+    <description>
+        Bill of Materials for log-weaver. Import this once in a consuming
+        project's &lt;dependencyManagement&gt; and then reference any of
+        log-api / log-weaver-core / log-weaver-maven-plugin / log-weaver-agent
+        without specifying a version.
+    </description>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-maven-plugin</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-agent</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>

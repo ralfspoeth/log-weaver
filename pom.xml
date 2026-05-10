@@ -20,6 +20,7 @@
         - log-weaver-core         : transformation engine (no build-tool dependencies)
         - log-weaver-maven-plugin : @Mojo wrapping the core for the Maven build
         - log-weaver-agent        : Java agent wrapping the core as a ClassFileTransformer
+        - log-weaver-bom          : Bill of Materials importing all of the above at one version
     </description>
 
     <url>https://github.com/ralfspoeth/log-weaver</url>
@@ -41,6 +42,7 @@
         <module>log-weaver-core</module>
         <module>log-weaver-maven-plugin</module>
         <module>log-weaver-agent</module>
+        <module>log-weaver-bom</module>
     </modules>
 
     <dependencyManagement>
