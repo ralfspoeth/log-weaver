@@ -33,7 +33,7 @@ Import the BOM once to keep all log-weaver artifacts in sync:
         <dependency>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-bom</artifactId>
-            <version>0.9</version>
+            <version>0.12</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>

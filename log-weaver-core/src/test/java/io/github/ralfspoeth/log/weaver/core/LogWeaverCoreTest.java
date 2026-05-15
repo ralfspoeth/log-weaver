@@ -252,7 +252,7 @@ class LogWeaverCoreTest {
 
         MethodModel helper = findMethodByPrefix(cm, "lambda$logweaver$foo$");
         List<String> stringConstants = ldcStringConstants(helper);
-        assertTrue(stringConstants.contains("Override.foo(%s)"));
+        assertTrue(stringConstants.contains("Override.foo(%s) -> void"));
     }
 
     @Test
@@ -510,12 +510,14 @@ class LogWeaverCoreTest {
                     .orElseThrow();
             m.setAccessible(true);
 
-            assertEquals("Va.greet(alice, bob)",
-                    m.invoke(null, (Object) new String[]{"alice", "bob"}));
-            assertEquals("Va.greet(alice)",
-                    m.invoke(null, (Object) new String[]{"alice"}));
-            assertEquals("Va.greet()",
-                    m.invoke(null, (Object) new String[]{}));
+            assertAll(
+                    () -> assertEquals("Va.greet(alice, bob) -> void",
+                            m.invoke(null, (Object) new String[]{"alice", "bob"})),
+                    () -> assertEquals("Va.greet(alice) -> void",
+                            m.invoke(null, (Object) new String[]{"alice"})),
+                    () -> assertEquals("Va.greet() -> void",
+                            m.invoke(null, (Object) new String[]{}))
+            );
         }
     }
 
@@ -552,7 +554,7 @@ class LogWeaverCoreTest {
                     .orElseThrow();
             m.setAccessible(true);
 
-            assertEquals("IntVa.sum(1, 2, 3)",
+            assertEquals("IntVa.sum(1, 2, 3) -> void",
                     m.invoke(null, (Object) new int[]{1, 2, 3}));
         }
     }
@@ -590,11 +592,13 @@ class LogWeaverCoreTest {
                     .orElseThrow();
             m.setAccessible(true);
 
-            assertEquals("Mixed.log(7, a, b)",
-                    m.invoke(null, 7, new String[]{"a", "b"}));
-            // Empty varargs leaves a trailing ", " — minor cosmetic trade-off.
-            assertEquals("Mixed.log(7, )",
-                    m.invoke(null, 7, new String[]{}));
+            assertAll(
+                    () -> assertEquals("Mixed.log(7, a, b) -> void",
+                            m.invoke(null, 7, new String[]{"a", "b"})),
+                    // Empty varargs leaves a trailing ", " — minor cosmetic trade-off.
+                    () -> assertEquals("Mixed.log(7, ) -> void",
+                            m.invoke(null, 7, new String[]{}))
+            );
         }
     }
 
@@ -694,7 +698,9 @@ class LogWeaverCoreTest {
         return baseDir.resolve(internal + ".class");
     }
 
-    /** New entry point: drive the transformation via LogWeaverCore directly. */
+    /**
+     * New entry point: drive the transformation via LogWeaverCore directly.
+     */
     private static void runWeaver(Path classesDir) throws Exception {
         LogWeaverCore.WeaveStats stats = LogWeaverCore.weaveDirectory(classesDir);
         if (!stats.isClean()) {

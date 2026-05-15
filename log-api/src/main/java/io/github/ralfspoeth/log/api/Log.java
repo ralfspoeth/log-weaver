@@ -27,7 +27,7 @@ public @interface Log {
      * If {@code true}, emit a return log capturing parameters plus the return
      * value, instead of an entry log capturing just the parameters.
      */
-    boolean logReturn() default false;
+    boolean logReturn() default true;
 
     /**
      * Level used by the always-on {@code Throwable} catch. {@link Level#OFF}
