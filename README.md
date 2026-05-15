@@ -71,9 +71,9 @@ The Maven plugin runs in the `process-classes` phase, after
      with `$logweaver$LOGGER = System.getLogger("<fqcn>");`.
    - Each annotated method gets exactly **one** parameter-aware log call —
      entry vs. return is mutually exclusive:
-     - `logReturn = false` (the default): a single entry log before the body,
+     - `logReturn = false`: a single entry log before the body,
        capturing the (boxed) parameters.
-     - `logReturn = true`: a single return log before each `XRETURN`,
+     - `logReturn = true` (the default): a single return log before each `XRETURN`,
        capturing the parameters and (for non-void methods) the return value.
    - On top of that, the body is **always** wrapped in a `Throwable` catch
      that calls `logger.log(exceptionLevel, t.getMessage(), t)` and re-throws.
@@ -114,7 +114,7 @@ dependency for the annotations themselves:
     <dependency>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-api</artifactId>
-        <version>0.9</version>
+        <version>0.12</version>
     </dependency>
 </dependencies>
 
@@ -123,7 +123,7 @@ dependency for the annotations themselves:
         <plugin>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-maven-plugin</artifactId>
-            <version>0.9</version>
+            <version>0.12</version>
             <executions>
                 <execution>
                     <goals>
