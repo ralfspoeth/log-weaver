@@ -244,7 +244,7 @@ the woven class contains:
 | helper | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result) |
 | helper | `$logweaver$va` | `(String) -> String` — added once per class, only when at least one woven method is varargs |
 
-For the same method declared as `@Log` (logReturn defaulting to false), the
+For the same method declared as `@Log` (logReturn set to `false`), the
 single helper would instead be `(Integer, String) -> String` and would
 format the entry message.
 
