@@ -664,6 +664,157 @@ class LogWeaverCoreTest {
         return classFile;
     }
 
+    // ── What a scoped @LogAll leaves alone ───────────────────────────────────
+
+    /**
+     * An interface is not swept up by a package- or module-wide {@code @LogAll}.
+     * <p>
+     * Its methods are abstract, {@code default} or {@code static}, and weaving
+     * one means putting a logger field into an interface - where JVMS 4.5 allows
+     * only {@code public static final}. Emitting the private field that is right
+     * in a class produced {@code Illegal field modifiers ... 0x101A} at class
+     * load, which is the failure this exclusion exists to prevent.
+     */
+    @Test
+    void aScopedLogAllSkipsInterfaces() {
+        ClassModel iface = parse(interfaceBytes(ClassDesc.of("com.example.Delivery"), false));
+        assertTrue(LogWeaverCore.sweptUpByScope(iface, scopeOf()),
+                "a scoped @LogAll must leave an interface alone");
+    }
+
+    /** A record's members are the compiler's work, not the author's. */
+    @Test
+    void aScopedLogAllSkipsRecords() {
+        ClassModel rec = parse(recordBytes(ClassDesc.of("com.example.FeedStatus")));
+        assertTrue(LogWeaverCore.sweptUpByScope(rec, scopeOf()),
+                "a scoped @LogAll must leave a record alone");
+    }
+
+    /**
+     * A package-private permitted subtype is an implementation detail its own
+     * package chose to hide. The fact that it is permitted lives in the sealed
+     * supertype, so the check consults what the pre-scan collected rather than
+     * the class's own bytes - and a class the scan never saw is not excluded.
+     */
+    @Test
+    void aScopedLogAllSkipsPackagePrivatePermittedSubtypes() {
+        ClassDesc atomic = ClassDesc.of("com.example.AtomicDelivery");
+        ClassModel cm = parse(plainClassBytes(atomic, /* isPublic */ false));
+
+        assertAll(
+                () -> assertTrue(
+                        LogWeaverCore.sweptUpByScope(cm, scopeOf(atomic.descriptorString())),
+                        "a hidden case of a sealed type must be left alone"),
+                () -> assertFalse(
+                        LogWeaverCore.sweptUpByScope(cm, scopeOf()),
+                        "and only because the scan found it permitted, not because it is package-private"),
+                () -> assertFalse(
+                        LogWeaverCore.sweptUpByScope(
+                                parse(plainClassBytes(ClassDesc.of("com.example.Public"), true)),
+                                scopeOf(ClassDesc.of("com.example.Public").descriptorString())),
+                        "a public permitted subtype is API and stays woven"));
+    }
+
+    /**
+     * A plain class under a scoped {@code @LogAll} is still woven - the exclusions
+     * must not have turned the feature off.
+     */
+    @Test
+    void aScopedLogAllStillReachesAnOrdinaryClass() {
+        ClassModel cm = parse(plainClassBytes(ClassDesc.of("com.example.Watcher"), true));
+        assertFalse(LogWeaverCore.sweptUpByScope(cm, scopeOf()),
+                "an ordinary class is exactly what a scoped @LogAll is for");
+    }
+
+    /**
+     * {@code @LogAll} written on the interface itself is a decision about that
+     * interface and is obeyed - so the logger field has to be legal there.
+     * Loading the woven class is the assertion that matters: a private field
+     * would fail verification at {@code defineClass}, which is how this was
+     * reported.
+     */
+    @Test
+    void logAllOnAnInterfaceItselfIsObeyedAndVerifies(@TempDir Path tempDir) throws Exception {
+        ClassDesc cd = ClassDesc.of("com.example.Greeter");
+        Path classFile = classFilePath(tempDir, cd);
+        Files.createDirectories(classFile.getParent());
+        Files.write(classFile, interfaceBytes(cd, true));
+
+        runWeaver(tempDir);
+
+        ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
+        FieldModel logger = cm.fields().stream()
+                .filter(fm -> fm.fieldName().stringValue().equals(LogWeaverCore.LOGGER_FIELD_NAME))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the interface was not woven at all"));
+
+        assertAll(
+                () -> assertTrue(logger.flags().has(AccessFlag.PUBLIC),
+                        "a field of an interface must be public - JVMS 4.5"),
+                () -> assertTrue(logger.flags().has(AccessFlag.STATIC), "and static"),
+                () -> assertTrue(logger.flags().has(AccessFlag.FINAL), "and final"),
+                () -> assertFalse(logger.flags().has(AccessFlag.PRIVATE),
+                        "and never private, which is what 0x101A was"));
+
+        // the verifier is the real judge of the flag word
+        try (var cl = new URLClassLoader(new URL[]{tempDir.toUri().toURL()})) {
+            assertDoesNotThrow(() -> cl.loadClass("com.example.Greeter"),
+                    "the woven interface must still load");
+        }
+    }
+
+    // ── Fixtures for the exclusions ──────────────────────────────────────────
+
+    private static ClassModel parse(byte[] bytes) {
+        return ClassFile.of().parse(bytes);
+    }
+
+    /** A {@link Scopes} whose pre-scan found the given permitted subtypes. */
+    private static Scopes scopeOf(String... permittedDescriptors) {
+        return new Scopes(java.util.Optional.empty(), java.util.Map.of(),
+                java.util.Set.of(permittedDescriptors));
+    }
+
+    private static byte[] interfaceBytes(ClassDesc thisClass, boolean withLogAll) {
+        return ClassFile.of().build(thisClass, clb -> {
+            clb.withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_INTERFACE | ClassFile.ACC_ABSTRACT);
+            clb.withSuperclass(OBJECT_CD);
+            if (withLogAll) {
+                clb.with(RuntimeVisibleAnnotationsAttribute.of(logAllAnnotation(0, "INFO", ".*")));
+            }
+            // a default method, so there is a body a weaver could wrap
+            clb.withMethodBody("greet", MethodTypeDesc.of(CD_void),
+                    ClassFile.ACC_PUBLIC, CodeBuilder::return_);
+        });
+    }
+
+    private static byte[] recordBytes(ClassDesc thisClass) {
+        ClassDesc recordCd = ClassDesc.of("java.lang.Record");
+        return ClassFile.of().build(thisClass, clb -> {
+            clb.withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL);
+            clb.withSuperclass(recordCd);
+            // the Record attribute is what makes it a record; there is no ACC_RECORD
+            clb.with(java.lang.classfile.attribute.RecordAttribute.of(
+                    java.lang.classfile.attribute.RecordComponentInfo.of("name", STRING_CD)));
+            clb.withField("name", STRING_CD, ClassFile.ACC_PRIVATE | ClassFile.ACC_FINAL);
+            clb.withMethodBody("name", MethodTypeDesc.of(STRING_CD),
+                    ClassFile.ACC_PUBLIC, cb -> {
+                        cb.aload(0);
+                        cb.getfield(thisClass, "name", STRING_CD);
+                        cb.areturn();
+                    });
+        });
+    }
+
+    private static byte[] plainClassBytes(ClassDesc thisClass, boolean isPublic) {
+        return ClassFile.of().build(thisClass, clb -> {
+            clb.withFlags(isPublic ? ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL : ClassFile.ACC_FINAL);
+            clb.withSuperclass(OBJECT_CD);
+            clb.withMethodBody("claims", MethodTypeDesc.of(CD_void),
+                    ClassFile.ACC_PUBLIC, CodeBuilder::return_);
+        });
+    }
+
     private static Path writeClassWithLogAll(Path baseDir, ClassDesc thisClass,
                                              Annotation logAllAnnotation,
                                              java.util.function.Consumer<ClassBuilder> methods) throws Exception {

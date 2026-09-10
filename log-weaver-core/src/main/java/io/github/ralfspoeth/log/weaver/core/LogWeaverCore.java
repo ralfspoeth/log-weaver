@@ -128,29 +128,40 @@ public final class LogWeaverCore {
      * file in the tree and collects their respective {@code @LogAll} configurations.
      */
     public static Scopes scanScopes(Path root) throws IOException {
-        List<Path> infoFiles;
+        List<Path> classFiles;
         try (var stream = Files.walk(root)) {
-            infoFiles = stream.filter(p -> {
-                String n = p.getFileName().toString();
-                return n.equals("module-info.class") || n.equals("package-info.class");
-            }).toList();
+            classFiles = stream.filter(p -> p.getFileName().toString().endsWith(".class")).toList();
         }
 
         Optional<LogAllConfig> moduleConfig = Optional.empty();
         Map<String, LogAllConfig> packageConfigs = new HashMap<>();
+        // Every sealed type names its permitted subtypes; no permitted subtype
+        // names the type that permits it. So the fact has to be gathered from the
+        // whole tree here, where the tree is in hand, rather than asked of a class
+        // that cannot answer it.
+        Set<String> sealedPermits = new HashSet<>();
 
-        for (Path info : infoFiles) {
-            ClassModel cm = ClassFile.of().parse(Files.readAllBytes(info));
+        for (Path file : classFiles) {
+            ClassModel cm = ClassFile.of().parse(Files.readAllBytes(file));
+
+            cm.findAttribute(Attributes.permittedSubclasses()).ifPresent(attr ->
+                    attr.permittedSubclasses().forEach(
+                            entry -> sealedPermits.add(entry.asSymbol().descriptorString())));
+
+            String name = file.getFileName().toString();
+            if (!name.equals("module-info.class") && !name.equals("package-info.class")) {
+                continue;
+            }
             Optional<LogAllConfig> cfg = readLogAllConfigFromClass(cm);
             if (cfg.isEmpty()) continue;
 
-            if (info.getFileName().toString().equals("module-info.class")) {
+            if (name.equals("module-info.class")) {
                 moduleConfig = cfg;
             } else {
                 packageConfigs.put(cm.thisClass().asSymbol().packageName(), cfg.get());
             }
         }
-        return new Scopes(moduleConfig, packageConfigs);
+        return new Scopes(moduleConfig, packageConfigs, sealedPermits);
     }
 
     /**
@@ -178,9 +189,7 @@ public final class LogWeaverCore {
         ClassDesc owner = cm.thisClass().asSymbol();
 
         // Resolve the effective @LogAll for this class: type > package > module.
-        Optional<LogAllConfig> effectiveAll = readLogAllConfigFromClass(cm)
-                .or(() -> Optional.ofNullable(scopes.byPackage().get(owner.packageName())))
-                .or(scopes::module);
+        Optional<LogAllConfig> effectiveAll = effectiveLogAll(cm, owner, scopes);
 
         // A method counts as "already woven" iff its synthetic helper is
         // present. The helper name is deterministic per (method name,
@@ -213,7 +222,7 @@ public final class LogWeaverCore {
             if (firstCall[0]) {
                 firstCall[0] = false;
                 if (!hasLoggerField) {
-                    clb.withField(LOGGER_FIELD_NAME, CD_Logger, ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_FINAL | ClassFile.ACC_SYNTHETIC);
+                    clb.withField(LOGGER_FIELD_NAME, CD_Logger, loggerFieldFlags(cm));
                 }
                 if (!hasClinit) {
                     // Class has no <clinit> yet – add one that just initializes LOGGER.
@@ -251,6 +260,81 @@ public final class LogWeaverCore {
                 clb.with(element);
             }
         });
+    }
+
+    /**
+     * The {@code @LogAll} that governs this class: type, then package, then
+     * module - except that a scoped one does not reach the kinds of type listed
+     * in {@link #sweptUpByScope(ClassModel, Scopes)}.
+     * <p>
+     * The distinction is the point. {@code @LogAll} written <em>on</em> a type is
+     * a decision about that type, and is obeyed whatever kind it is; one
+     * inherited from a package or a module is a blanket rule its author never
+     * saw the members of, and a blanket rule should not sweep up the things it
+     * cannot instrument sensibly. So a record that really is to be woven says so
+     * itself, and the escape hatch costs one annotation.
+     */
+    private static Optional<LogAllConfig> effectiveLogAll(ClassModel cm, ClassDesc owner, Scopes scopes) {
+        Optional<LogAllConfig> onTheType = readLogAllConfigFromClass(cm);
+        if (onTheType.isPresent()) return onTheType;
+        if (sweptUpByScope(cm, scopes)) return Optional.empty();
+        return Optional.ofNullable(scopes.byPackage().get(owner.packageName())).or(scopes::module);
+    }
+
+    /**
+     * Three kinds of type a package- or module-wide {@code @LogAll} should leave
+     * alone.
+     * <ul>
+     *   <li><b>Interfaces.</b> Their methods are abstract, {@code default} or
+     *       {@code static}; only the last two have a body to wrap, and weaving
+     *       one means putting a logger field into an interface, where JVMS 4.5
+     *       allows only {@code public static final}. That mismatch is how this
+     *       exclusion came to be written: a {@code @LogAll} on a module produced
+     *       {@code ClassFormatError: Illegal field modifiers ... 0x101A} - a
+     *       private static final synthetic field, which is right in a class and
+     *       unverifiable in an interface.</li>
+     *   <li><b>Records.</b> Accessors, {@code equals}, {@code hashCode},
+     *       {@code toString} and the canonical constructor are all generated, so
+     *       weaving them logs the compiler's work rather than the author's. A
+     *       codebase built out of records would drown in it, and an accessor
+     *       called on every JMX poll would drown in it fastest.</li>
+     *   <li><b>Package-private permitted subtypes of a sealed type.</b> A sealed
+     *       hierarchy whose cases are hidden is one where the interface answers
+     *       the question and the cases are how; instrumenting a case logs an
+     *       implementation detail its own package deliberately kept to itself.</li>
+     * </ul>
+     * Everything else the weaver would rather not touch - {@code <init>},
+     * {@code <clinit>}, abstract, native, bridge and synthetic methods - is
+     * already refused per method by {@link LogAllConfig#matches(MethodModel)},
+     * and {@code module-info} and {@code package-info} never reach here at all.
+     */
+    static boolean sweptUpByScope(ClassModel cm, Scopes scopes) {
+        if (cm.flags().has(AccessFlag.INTERFACE)) {
+            return true;
+        }
+        // There is no ACC_RECORD flag; the Record attribute is what says so.
+        if (cm.findAttribute(Attributes.record()).isPresent()) {
+            return true;
+        }
+        return !cm.flags().has(AccessFlag.PUBLIC)
+                && scopes.sealedPermits().contains(cm.thisClass().asSymbol().descriptorString());
+    }
+
+    /**
+     * Flags for the per-class logger field.
+     * <p>
+     * A field of an interface must be {@code public static final} and may not be
+     * private (JVMS 4.5), so the flags that are right for a class produce an
+     * unverifiable interface. Scoped {@code @LogAll} no longer reaches an
+     * interface at all, but {@code @Log} on a {@code default} method and
+     * {@code @LogAll} written on the interface itself both still do, and either
+     * would otherwise fail at class load rather than here.
+     */
+    private static int loggerFieldFlags(ClassModel cm) {
+        int visibility = cm.flags().has(AccessFlag.INTERFACE)
+                ? ClassFile.ACC_PUBLIC
+                : ClassFile.ACC_PRIVATE;
+        return visibility | ClassFile.ACC_STATIC | ClassFile.ACC_FINAL | ClassFile.ACC_SYNTHETIC;
     }
 
     /** Emits {@code LOGGER = System.getLogger(<loggerName>);} into the given code builder. */

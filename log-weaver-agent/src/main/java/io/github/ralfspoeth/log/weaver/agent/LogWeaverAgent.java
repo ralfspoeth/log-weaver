@@ -11,6 +11,7 @@ import java.security.ProtectionDomain;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -110,7 +111,7 @@ public final class LogWeaverAgent {
             Map<String, LogAllConfig> byPackage = pkgCfg
                     .map(c -> Map.of(pkg, c))
                     .orElse(Map.of());
-            return new Scopes(mod, byPackage);
+            return new Scopes(mod, byPackage, Set.of());
         }
 
         /**

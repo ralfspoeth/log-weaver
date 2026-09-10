@@ -33,7 +33,7 @@ Import the BOM once to keep all log-weaver artifacts in sync:
         <dependency>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-bom</artifactId>
-            <version>0.12</version>
+            <version>0.13</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -66,7 +66,8 @@ The Maven plugin runs in the `process-classes` phase, after
    `@LogAll` for the class.
 3. If anything matches, the class is rewritten in place:
    - A synthetic `private static final System.Logger $logweaver$LOGGER` field
-     is added (named after the class' fully-qualified name).
+     is added (named after the class' fully-qualified name). In an interface it
+     is `public static final` instead — JVMS 4.5 permits nothing else there.
    - Either a fresh `<clinit>` is generated, or the existing one is prepended
      with `$logweaver$LOGGER = System.getLogger("<fqcn>");`.
    - Each annotated method gets exactly **one** parameter-aware log call —
@@ -114,7 +115,7 @@ dependency for the annotations themselves:
     <dependency>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-api</artifactId>
-        <version>0.12</version>
+        <version>0.13</version>
     </dependency>
 </dependencies>
 
@@ -123,7 +124,7 @@ dependency for the annotations themselves:
         <plugin>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-maven-plugin</artifactId>
-            <version>0.12</version>
+            <version>0.13</version>
             <executions>
                 <execution>
                     <goals>
@@ -232,6 +233,33 @@ A method "matches" a `@LogAll` when:
 - its access flags satisfy `modifiers` (the value `0` means "any visibility",
   otherwise OR-semantics: at least one of the requested bits must be set),
 - its name matches `methodPattern` (a `java.util.regex` pattern; default `.*`).
+
+#### What a package or module scope does not reach
+
+Since **0.13**, a `@LogAll` inherited from a `package-info` or a `module-info`
+skips three kinds of type. A `@LogAll` written *on* the type still applies to it,
+whatever kind it is — the exclusions are about blanket rules whose author never
+saw the members they would sweep up, not about what the weaver is able to do.
+
+| Kind | Why |
+|---|---|
+| **interfaces** | Methods are abstract, `default` or `static`; only the last two have a body. Weaving one also means a logger field in an interface, where JVMS 4.5 permits only `public static final`. |
+| **records** | Accessors, `equals`, `hashCode`, `toString` and the canonical constructor are generated, so weaving them logs the compiler's work rather than the author's. |
+| **package-private permitted subtypes of a sealed type** | A sealed hierarchy with hidden cases is one where the interface answers the question and the cases are how; instrumenting a case logs what its package deliberately kept to itself. |
+
+The third is decided from the *supertype*: no class can tell from its own bytes
+that it is permitted, so the names are collected while the classes directory is
+scanned for scopes. The Java agent sees one class at a time and therefore cannot
+collect them — under the agent that exclusion does not fire, while the other two
+do.
+
+> **0.13 also fixes a class-format bug.** Before it, weaving an interface emitted
+> the logger field with the modifiers that are right for a class — `private
+> static final synthetic`, `0x101A` — which the verifier rejects with
+> `ClassFormatError: Illegal field modifiers`. A module-wide `@LogAll` over a
+> codebase containing sealed interfaces produced unloadable class files. The
+> field is now `public static final synthetic` in an interface, and interfaces
+> are no longer swept up by a scope in the first place.
 
 ## Generated artifacts
 
