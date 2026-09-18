@@ -10,13 +10,13 @@ in a third-party logging facade.
 
 The project is a multi-module Maven build:
 
-| module | what it ships |
-|---|---|
-| `log-api` | the `@Log` / `@LogAll` annotation types — the only thing user code needs to compile against |
-| `log-weaver-core` | the transformation engine — no build-tool dependencies, embeddable |
-| `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes` |
-| `log-weaver-agent` | a Java agent that runs the core as a `ClassFileTransformer` at class-load time |
-| `log-weaver-bom` | Bill of Materials — import once, reference any of the above without specifying a version |
+| module                    | what it ships                                                                               |
+|---------------------------|---------------------------------------------------------------------------------------------|
+| `log-api`                 | the `@Log` / `@LogAll` annotation types — the only thing user code needs to compile against |
+| `log-weaver-core`         | the transformation engine — no build-tool dependencies, embeddable                          |
+| `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes`                          |
+| `log-weaver-agent`        | a Java agent that runs the core as a `ClassFileTransformer` at class-load time              |
+| `log-weaver-bom`          | Bill of Materials — import once, reference any of the above without specifying a version    |
 
 The core is the single source of truth for the transformation; the Maven
 plugin and the agent are just glue around it. All modules share the
@@ -241,11 +241,11 @@ skips three kinds of type. A `@LogAll` written *on* the type still applies to it
 whatever kind it is — the exclusions are about blanket rules whose author never
 saw the members they would sweep up, not about what the weaver is able to do.
 
-| Kind | Why |
-|---|---|
-| **interfaces** | Methods are abstract, `default` or `static`; only the last two have a body. Weaving one also means a logger field in an interface, where JVMS 4.5 permits only `public static final`. |
-| **records** | Accessors, `equals`, `hashCode`, `toString` and the canonical constructor are generated, so weaving them logs the compiler's work rather than the author's. |
-| **package-private permitted subtypes of a sealed type** | A sealed hierarchy with hidden cases is one where the interface answers the question and the cases are how; instrumenting a case logs what its package deliberately kept to itself. |
+| Kind                                                    | Why                                                                                                                                                                                   |
+|---------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **interfaces**                                          | Methods are abstract, `default` or `static`; only the last two have a body. Weaving one also means a logger field in an interface, where JVMS 4.5 permits only `public static final`. |
+| **records**                                             | Accessors, `equals`, `hashCode`, `toString` and the canonical constructor are generated, so weaving them logs the compiler's work rather than the author's.                           |
+| **package-private permitted subtypes of a sealed type** | A sealed hierarchy with hidden cases is one where the interface answers the question and the cases are how; instrumenting a case logs what its package deliberately kept to itself.   |
 
 The third is decided from the *supertype*: no class can tell from its own bytes
 that it is permitted, so the names are collected while the classes directory is
@@ -266,11 +266,11 @@ do.
 For `pkg.Cls.foo(int, String) -> int` with `@Log(logReturn = true)`,
 the woven class contains:
 
-| element | name | shape |
-|---|---|---|
-| field | `$logweaver$LOGGER` | `private static final System.Logger` |
-| helper | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result) |
-| helper | `$logweaver$va` | `(String) -> String` — added once per class, only when at least one woven method is varargs |
+| element | name                          | shape                                                                                       |
+|---------|-------------------------------|---------------------------------------------------------------------------------------------|
+| field   | `$logweaver$LOGGER`           | `private static final System.Logger`                                                        |
+| helper  | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result)              |
+| helper  | `$logweaver$va`               | `(String) -> String` — added once per class, only when at least one woven method is varargs |
 
 For the same method declared as `@Log` (logReturn set to `false`), the
 single helper would instead be `(Integer, String) -> String` and would
