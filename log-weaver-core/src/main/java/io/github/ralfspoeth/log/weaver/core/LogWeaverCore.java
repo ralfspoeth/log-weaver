@@ -41,10 +41,15 @@ public final class LogWeaverCore {
     public static final String LOGGER_FIELD_NAME = "$logweaver$LOGGER";
 
     /**
-     * Synthetic per-class helper that strips the leading {@code '['} and
-     * trailing {@code ']'} from {@code Arrays.toString(...)} output, so a
-     * varargs argument shows up in the log message as comma-separated
-     * elements rather than as the raw array's identity hash.
+     * Synthetic per-class helper that turns {@code Arrays.toString(...)} output
+     * into the substring that belongs in the log message. The two-argument
+     * signature {@code (String arraysToStringOutput, String prefix)} lets an
+     * empty varargs disappear cleanly: {@code "[]"} maps to {@code ""}, so no
+     * trailing comma is left behind when a varargs parameter follows regular
+     * parameters. A non-empty {@code "[a, b, c]"} maps to
+     * {@code prefix + "a, b, c"}, where {@code prefix} is {@code ", "} when
+     * varargs follows other parameters and {@code ""} when varargs is the
+     * only parameter.
      */
     public static final String VA_HELPER_NAME = "$logweaver$va";
 
@@ -530,8 +535,12 @@ public final class LogWeaverCore {
                             : CD_Object.arrayType();
                     cb.invokestatic(CD_Arrays, "toString",
                             MethodTypeDesc.of(CD_String, atsParamType));
+                    // Prefix ", " if this varargs slot follows regular parameters;
+                    // "" if it is the only parameter. The helper drops the prefix
+                    // when the varargs array is empty, so no trailing comma appears.
+                    cb.ldc(varargsSlot > 0 ? ", " : "");
                     cb.invokestatic(owner, VA_HELPER_NAME,
-                            MethodTypeDesc.of(CD_String, CD_String));
+                            MethodTypeDesc.of(CD_String, CD_String, CD_String));
                 }
                 cb.aastore();
             }
@@ -542,32 +551,50 @@ public final class LogWeaverCore {
 
     private static void emitVaHelper(ClassBuilder clb) {
         clb.withMethod(VA_HELPER_NAME,
-                MethodTypeDesc.of(CD_String, CD_String),
+                MethodTypeDesc.of(CD_String, CD_String, CD_String),
                 ClassFile.ACC_PRIVATE | ClassFile.ACC_STATIC | ClassFile.ACC_SYNTHETIC,
                 mb -> mb.withCode(cb -> {
+                    // (String s, String prefix)
+                    //   if s.length() < 2 || s.charAt(0) != '['  -> return s
+                    //   if s equals "[]"                         -> return ""
+                    //   else                                     -> return prefix + s.substring(1, s.length()-1)
                     Label returnAsIs = cb.newLabel();
+                    Label stripBrackets = cb.newLabel();
 
                     cb.aload(0);
                     cb.invokevirtual(CD_String, "length", MethodTypeDesc.of(CD_int));
-                    cb.istore(1);
+                    cb.istore(2);                                            // len -> slot 2 (0=s, 1=prefix)
 
-                    cb.iload(1);
+                    cb.iload(2);
                     cb.iconst_2();
-                    cb.if_icmplt(returnAsIs);
+                    cb.if_icmplt(returnAsIs);                                // len < 2
 
                     cb.aload(0);
                     cb.iconst_0();
                     cb.invokevirtual(CD_String, "charAt", MethodTypeDesc.of(CD_char, CD_int));
                     cb.bipush((byte) '[');
-                    cb.if_icmpne(returnAsIs);
+                    cb.if_icmpne(returnAsIs);                                // s.charAt(0) != '['
 
-                    cb.aload(0);
+                    cb.iload(2);
+                    cb.iconst_2();
+                    cb.if_icmpne(stripBrackets);                             // len != 2
+
+                    // Empty array "[]" -> return ""
+                    cb.ldc("");
+                    cb.areturn();
+
+                    cb.labelBinding(stripBrackets);
+                    // return prefix.concat(s.substring(1, len - 1))
+                    cb.aload(1);                                             // prefix
+                    cb.aload(0);                                             // s
                     cb.iconst_1();
-                    cb.iload(1);
+                    cb.iload(2);
                     cb.iconst_1();
                     cb.isub();
                     cb.invokevirtual(CD_String, "substring",
                             MethodTypeDesc.of(CD_String, CD_int, CD_int));
+                    cb.invokevirtual(CD_String, "concat",
+                            MethodTypeDesc.of(CD_String, CD_String));
                     cb.areturn();
 
                     cb.labelBinding(returnAsIs);
@@ -699,16 +726,28 @@ public final class LogWeaverCore {
     // ── Synthesized messages ─────────────────────────────────────────────────
 
     private static String synthesizeMessage(ClassDesc owner, MethodModel mm) {
-        int paramCount = mm.methodTypeSymbol().parameterCount();
-        String args = String.join(", ", Collections.nCopies(paramCount, "%s"));
-        return owner.displayName() + "." + mm.methodName().stringValue() + "(" + args + ")";
+        return owner.displayName() + "." + mm.methodName().stringValue() + "(" + buildArgList(mm) + ")";
     }
 
     private static String synthesizeReturnMessage(ClassDesc owner, MethodModel mm, boolean isVoid) {
-        int paramCount = mm.methodTypeSymbol().parameterCount();
-        String args = String.join(", ", Collections.nCopies(paramCount, "%s"));
         String tail = isVoid ? "void" : "%s";
-        return owner.displayName() + "." + mm.methodName().stringValue() + "(" + args + ") -> " + tail;
+        return owner.displayName() + "." + mm.methodName().stringValue() + "(" + buildArgList(mm) + ") -> " + tail;
+    }
+
+    /**
+     * Builds the parenthesised argument-list template for a message. Non-varargs
+     * methods get plain {@code "%s, %s, ..."}. Varargs methods that also have
+     * regular parameters omit the separator before the trailing {@code %s} so
+     * that the varargs helper can emit its own leading {@code ", "} (or nothing,
+     * for an empty varargs) without leaving a stray comma behind.
+     */
+    private static String buildArgList(MethodModel mm) {
+        int paramCount = mm.methodTypeSymbol().parameterCount();
+        boolean varargsAfterRegular = mm.flags().has(AccessFlag.VARARGS) && paramCount > 1;
+        if (!varargsAfterRegular) {
+            return String.join(", ", Collections.nCopies(paramCount, "%s"));
+        }
+        return String.join(", ", Collections.nCopies(paramCount - 1, "%s")) + "%s";
     }
 
     // ── Type/slot helpers ────────────────────────────────────────────────────

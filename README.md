@@ -19,9 +19,8 @@ The project is a multi-module Maven build:
 | `log-weaver-bom`          | Bill of Materials — import once, reference any of the above without specifying a version    |
 
 The core is the single source of truth for the transformation; the Maven
-plugin and the agent are just glue around it. All modules share the
-same version and release together — `log-api`'s use outside this project is
-negligible, so co-versioning is simpler than keeping it on its own track.
+plugin and the agent are just glue around it. All modules share the same
+version and release together.
 
 ## BOM
 
@@ -33,7 +32,7 @@ Import the BOM once to keep all log-weaver artifacts in sync:
         <dependency>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-bom</artifactId>
-            <version>0.13</version>
+            <version>1.0</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -91,11 +90,12 @@ the record is loggable.
 
 Varargs are unpacked into individual elements rather than rendered as the
 array's identity hash. A class with any varargs methods picks up a small
-synthetic helper `$logweaver$va(String) -> String` that strips the
-surrounding `[`/`]` from `Arrays.toString` output, so
-`foo(2, "a", "b")` shows up as `Cls.foo(2, a, b)` in the log message.
-A `foo(2)` call (empty varargs after a regular param) currently leaves a
-trailing `, ` in the message.
+synthetic helper `$logweaver$va(String, String) -> String` that strips
+the surrounding `[`/`]` from `Arrays.toString` output and, when the
+array is empty, drops the leading separator too — so
+`foo(2, "a", "b")` shows up as `Cls.foo(2, a, b)` and `foo(2)` (empty
+varargs after a regular param) shows up as `Cls.foo(2)` — no trailing
+comma.
 
 ## Requirements
 
@@ -115,7 +115,7 @@ dependency for the annotations themselves:
     <dependency>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-api</artifactId>
-        <version>0.13</version>
+        <version>1.0</version>
     </dependency>
 </dependencies>
 
@@ -124,7 +124,7 @@ dependency for the annotations themselves:
         <plugin>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-maven-plugin</artifactId>
-            <version>0.13</version>
+            <version>1.0</version>
             <executions>
                 <execution>
                     <goals>
@@ -263,14 +263,6 @@ scanned for scopes. The Java agent sees one class at a time and therefore cannot
 collect them — under the agent that exclusion does not fire, while the other two
 do.
 
-> **0.13 also fixes a class-format bug.** Before it, weaving an interface emitted
-> the logger field with the modifiers that are right for a class — `private
-> static final synthetic`, `0x101A` — which the verifier rejects with
-> `ClassFormatError: Illegal field modifiers`. A module-wide `@LogAll` over a
-> codebase containing sealed interfaces produced unloadable class files. The
-> field is now `public static final synthetic` in an interface, and interfaces
-> are no longer swept up by a scope in the first place.
-
 ## Generated artifacts
 
 For `pkg.Cls.foo(int, String) -> int` with `@Log(logReturn = true)`,
@@ -280,7 +272,7 @@ the woven class contains:
 |---------|-------------------------------|---------------------------------------------------------------------------------------------|
 | field   | `$logweaver$LOGGER`           | `private static final System.Logger`                                                        |
 | helper  | `lambda$logweaver$foo$<hash>` | `(Integer, String, Integer) -> String` (return message: params + boxed result)              |
-| helper  | `$logweaver$va`               | `(String) -> String` — added once per class, only when at least one woven method is varargs |
+| helper  | `$logweaver$va`               | `(String, String) -> String` — added once per class when any woven method takes varargs     |
 
 For the same method declared as `@Log` (logReturn set to `false`), the
 single helper would instead be `(Integer, String) -> String` and would
@@ -349,4 +341,4 @@ core is self-contained and doesn't need a fixture project.
 
 ## License
 
-See the parent POM (`io.github.ralfspoeth:plumbum`) for license details.
+Released under the [MIT License](LICENSE) — © 2026 Ralf Spöth.

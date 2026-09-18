@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-weaver</artifactId>
-        <version>0.14-SNAPSHOT</version>
+        <version>${revision}</version>
     </parent>
 
     <artifactId>log-weaver-agent</artifactId>
@@ -50,6 +50,14 @@
                                     <excludes>
                                         <!-- Suppress the shade overlap warning; ManifestResourceTransformer below writes the final manifest. -->
                                         <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <!--
+                                          Drop both module-info.class files. A -javaagent jar is loaded on the
+                                          system class loader as an unnamed module regardless, and shading two
+                                          named modules into one jar is what triggers shade's "will break strong
+                                          encapsulation" warning.
+                                        -->
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
                                     </excludes>
                                 </filter>
                             </filters>

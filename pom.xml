@@ -9,7 +9,7 @@
     </parent>
 
     <artifactId>log-weaver</artifactId>
-    <version>0.14-SNAPSHOT</version>
+    <version>${revision}</version>
     <packaging>pom</packaging>
 
     <name>Log Weaver (parent)</name>
@@ -25,17 +25,35 @@
 
     <url>https://github.com/ralfspoeth/log-weaver</url>
 
+    <properties>
+        <revision>1.0</revision>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
     <scm>
         <url>scm:git:https://github.com/ralfspoeth/log-weaver</url>
         <developerConnection>scm:git:https://github.com/ralfspoeth/log-weaver.git</developerConnection>
         <tag>HEAD</tag>
     </scm>
 
-    <properties>
-        <maven.compiler.source>25</maven.compiler.source>
-        <maven.compiler.target>25</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+
+    <developers>
+        <developer>
+            <id>ralfspoeth</id>
+            <name>Ralf Spöth</name>
+            <email>ralf.spoeth@gmail.com</email>
+            <url>https://github.com/ralfspoeth</url>
+        </developer>
+    </developers>
 
     <modules>
         <module>log-api</module>
@@ -67,6 +85,13 @@
         </dependencies>
     </dependencyManagement>
 
+    <dependencies>
+        <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+        </dependency>
+    </dependencies>
+
     <build>
         <pluginManagement>
             <plugins>
@@ -95,6 +120,41 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-release-plugin</artifactId>
+            </plugin>
+            <!--
+              CI-friendly versioning: with <version>${revision}</version>, the raw
+              POM contains the unresolved property. Central-consumed artifacts have
+              no reactor to fall back on, so the property has to be substituted
+              before install/deploy. flatten-maven-plugin writes a flattened POM
+              to target/.flattened-pom.xml and rewires install/deploy to use it.
+              resolveCiFriendliesOnly leaves the rest of the POM alone
+              (dependencyManagement, plugin config, etc.) and only substitutes
+              ${revision} / ${sha1} / ${changelist}.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.8.0</version>
+                <configuration>
+                    <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                    <updatePomFile>true</updatePomFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

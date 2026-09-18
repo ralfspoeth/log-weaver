@@ -495,7 +495,7 @@ class LogWeaverCoreTest {
         ClassModel cm = ClassFile.of().parse(Files.readAllBytes(classFile));
 
         MethodModel vaHelper = findMethod(cm, LogWeaverCore.VA_HELPER_NAME);
-        assertEquals("(Ljava/lang/String;)Ljava/lang/String;",
+        assertEquals("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
                 vaHelper.methodType().stringValue());
 
         MethodModel format = findMethodByPrefix(cm, "lambda$logweaver$greet$");
@@ -595,8 +595,8 @@ class LogWeaverCoreTest {
             assertAll(
                     () -> assertEquals("Mixed.log(7, a, b) -> void",
                             m.invoke(null, 7, new String[]{"a", "b"})),
-                    // Empty varargs leaves a trailing ", " — minor cosmetic trade-off.
-                    () -> assertEquals("Mixed.log(7, ) -> void",
+                    // Empty varargs no longer leaves a trailing ", ".
+                    () -> assertEquals("Mixed.log(7) -> void",
                             m.invoke(null, 7, new String[]{}))
             );
         }
