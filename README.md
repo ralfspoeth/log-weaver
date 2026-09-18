@@ -176,16 +176,22 @@ Limitations versus the Maven plugin:
 ```java
 @Log                                          // entry log (params) at INFO;
                                               // exception handler at WARNING
-String greet(String name) { … }
+String greet(String name) {
+    // ...
+}
 
-@Log(level = ERROR, logReturn = true)         // return log (params + result)
+@Log(level = ERROR, logReturn = false)        // log call, not the result
                                               // at ERROR; no entry log
-int compute(int x) { … }
+int compute(int x) {
+    // ...
+}
 
 @Log(exceptionLevel = OFF)                    // entry log; the catch is still
                                               // installed but Level.OFF makes
                                               // the JDK drop the log record
-void fireAndForget() { … }
+void fireAndForget() {
+    // ...
+}
 ```
 
 Entry vs. return is mutually exclusive: `logReturn = true` *replaces* the
@@ -200,7 +206,9 @@ The values are resolved at weave-time by reading the annotation class'
 ```java
 // On a class — apply to every public method whose name starts with "do":
 @LogAll(modifiers = Modifier.PUBLIC, methodPattern = "do.*")
-public class Service { … }
+public class Service {
+    // ...
+}
 
 // On a package — applies to every class in this package
 //   (file: package-info.java)
@@ -210,7 +218,9 @@ package com.example.app;
 // On a module — applies to every package in this module
 //   (file: module-info.java)
 @LogAll
-module com.example.app { … }
+module com.example.app {
+    // ...
+}
 ```
 
 `@LogAll` drives the **entry log** at its declared level. The
