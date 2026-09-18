@@ -26,7 +26,7 @@
     <url>https://github.com/ralfspoeth/log-weaver</url>
 
     <properties>
-        <revision>1.0-SNAPSHOT</revision>
+        <revision>1.0</revision>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
@@ -34,7 +34,7 @@
     <scm>
         <url>scm:git:https://github.com/ralfspoeth/log-weaver</url>
         <developerConnection>scm:git:https://github.com/ralfspoeth/log-weaver.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>log-weaver-1.0</tag>
     </scm>
 
     <licenses>
