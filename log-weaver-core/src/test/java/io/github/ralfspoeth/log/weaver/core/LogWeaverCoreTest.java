@@ -595,7 +595,7 @@ class LogWeaverCoreTest {
             assertAll(
                     () -> assertEquals("Mixed.log(7, a, b) -> void",
                             m.invoke(null, 7, new String[]{"a", "b"})),
-                    // Empty varargs no longer leaves a trailing ", ".
+                    // Empty varargs no longer leaves a trailing ", "
                     () -> assertEquals("Mixed.log(7) -> void",
                             m.invoke(null, 7, new String[]{}))
             );

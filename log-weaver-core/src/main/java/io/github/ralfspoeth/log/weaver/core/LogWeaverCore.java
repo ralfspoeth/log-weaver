@@ -85,8 +85,8 @@ public final class LogWeaverCore {
      * Transform the given class file bytes.
      *
      * @return the original array reference iff no transformation was needed
-     *         (no {@code @Log} on any method, no {@code @LogAll} matching).
-     *         Otherwise a fresh byte array.
+     *         (no {@code @Log} on any method, no {@code @LogAll} matching),
+     *         otherwise a fresh byte array.
      */
     public static byte[] transformClass(byte[] classBytes, Scopes scopes) {
         return tryTransform(classBytes, scopes);

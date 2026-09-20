@@ -233,9 +233,9 @@ override the exception level, place an explicit `@Log` on that method.
 For each method:
 
 1. A method-level `@Log` wins outright.
-2. Otherwise the most-specific `@LogAll` that **matches** the method applies:
+2. Otherwise, the most-specific `@LogAll` that **matches** the method applies:
    class-level → package-info → module-info.
-3. Otherwise the method is left alone.
+3. Otherwise, the method is left alone.
 
 A method "matches" a `@LogAll` when:
 - it is not `<init>` or `<clinit>`,
