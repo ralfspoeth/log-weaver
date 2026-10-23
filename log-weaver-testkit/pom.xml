@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.ralfspoeth</groupId>
+        <artifactId>log-weaver</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>log-weaver-testkit</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Log Weaver Testkit</name>
+    <description>
+        A recording System.LoggerFinder for asserting on what the weaver
+        emitted. Registers itself as a service, so a consumer only adds the
+        test-scoped dependency and requires the module. Depends on nothing but
+        the JDK — no logging backend and no assertion library, so it works with
+        any test framework.
+    </description>
+</project>

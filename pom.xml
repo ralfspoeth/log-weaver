@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>plumbum</artifactId>
-        <version>3.0.3</version>
+        <version>3.0.4</version>
     </parent>
 
     <artifactId>log-weaver</artifactId>
@@ -60,6 +60,7 @@
         <module>log-weaver-core</module>
         <module>log-weaver-maven-plugin</module>
         <module>log-weaver-agent</module>
+        <module>log-weaver-testkit</module>
         <module>log-weaver-bom</module>
     </modules>
 

@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1] — 2026-10-23
+
+### Added
+- **`log-weaver-testkit`**, a recording `System.LoggerFinder` for asserting on
+  what the weaver emitted. It replaces `System.Logger`'s default backend for the
+  test JVM, so a test sees `System.Logger.Level` as annotated — no mapping to a
+  backend's own levels — and gets the message and throwable exactly as the woven
+  code passed them. Depends on nothing but the JDK: no logging backend, and no
+  assertion library, so it works with any test framework.
+
+  The module declares the `provides` itself, so a consumer adds the test-scoped
+  dependency and a `requires` and is done. Three constraints come from the JDK
+  rather than from the design: a finder is resolved once per JVM and cached, so
+  the recorder's state is static and a test calls `reset(Level)` to state its
+  threshold; it replaces the backend for the entire test JVM, so `from(Class)`
+  exists to filter to one woven class; and a second `System.LoggerFinder`
+  provider raises a `ServiceConfigurationError`.
+
 ## [1.0] — 2026-09-18
 
 First stable release. No API changes since 0.13; the version bump signals that

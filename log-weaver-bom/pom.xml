@@ -16,7 +16,7 @@
         Bill of Materials for log-weaver. Import this once in a consuming
         project's &lt;dependencyManagement&gt; and then reference any of
         log-api / log-weaver-core / log-weaver-maven-plugin / log-weaver-agent
-        without specifying a version.
+        / log-weaver-testkit without specifying a version.
     </description>
 
     <dependencyManagement>
@@ -39,6 +39,11 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>log-weaver-agent</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>log-weaver-testkit</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

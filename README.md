@@ -16,6 +16,7 @@ The project is a multi-module Maven build:
 | `log-weaver-core`         | the transformation engine — no build-tool dependencies, embeddable                          |
 | `log-weaver-maven-plugin` | a thin `@Mojo` wrapper that runs the core during `process-classes`                          |
 | `log-weaver-agent`        | a Java agent that runs the core as a `ClassFileTransformer` at class-load time              |
+| `log-weaver-testkit`      | a recording `System.LoggerFinder` for asserting on what was emitted, in tests               |
 | `log-weaver-bom`          | Bill of Materials — import once, reference any of the above without specifying a version    |
 
 The core is the single source of truth for the transformation; the Maven
@@ -32,7 +33,7 @@ Import the BOM once to keep all log-weaver artifacts in sync:
         <dependency>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-bom</artifactId>
-            <version>1.0</version>
+            <version>1.1</version>
             <type>pom</type>
             <scope>import</scope>
         </dependency>
@@ -97,6 +98,64 @@ array is empty, drops the leading separator too — so
 varargs after a regular param) shows up as `Cls.foo(2)` — no trailing
 comma.
 
+## Asserting on what was emitted
+
+`log-weaver-testkit` ships a `System.LoggerFinder` that records log calls
+instead of printing them, so a test can check what the weaver produced without
+a logging backend in the way — no level mapping, and the message and throwable
+arrive exactly as the woven code passed them.
+
+```xml
+<dependency>
+    <groupId>io.github.ralfspoeth</groupId>
+    <artifactId>log-weaver-testkit</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+The module declares the `provides` itself, because a service provider is
+declared by the module that supplies it — so a consumer needs no `provides`
+clause of its own, only a `requires`:
+
+```java
+open module com.example.test {
+    requires com.example;
+    requires org.junit.jupiter.api;
+    requires io.github.ralfspoeth.log.weaver.testkit;
+}
+```
+
+```java
+@BeforeEach
+void quiet() {
+    RecordingLoggerFinder.reset(Level.DEBUG);
+}
+
+@Test
+void theWovenCallAndItsFailureAreLogged() {
+    assertThrows(IllegalStateException.class, () -> subject.explode("x"));
+
+    // the always-on Throwable catch logs t.getMessage() with the throwable
+    assertTrue(RecordingLoggerFinder.at(Level.WARNING).stream()
+            .anyMatch(e -> e.threw(IllegalStateException.class)));
+}
+```
+
+Three things follow from how the JDK loads a finder, and they are constraints
+rather than choices:
+
+- **One finder per JVM, resolved once and cached.** There is no swapping it
+  between tests, so the recorder's state is static and a test states its
+  threshold up front via `reset`.
+- **It replaces the backend for the whole test JVM**, so other libraries' records
+  land in the recorder too. `from(Class)` filters to one woven class.
+- **Exactly one provider.** A second `System.LoggerFinder` on the module path
+  makes the JDK raise a `ServiceConfigurationError`.
+
+A suppressed level records nothing *and* never builds its message: the lazy
+`Supplier` is only invoked once `isLoggable` passes, which is handled by
+`System.Logger`'s default methods.
+
 ## Requirements
 
 - JDK 25 (the plugin uses the stabilised `java.lang.classfile` API).
@@ -115,7 +174,7 @@ dependency for the annotations themselves:
     <dependency>
         <groupId>io.github.ralfspoeth</groupId>
         <artifactId>log-api</artifactId>
-        <version>1.0</version>
+        <version>1.1</version>
     </dependency>
 </dependencies>
 
@@ -124,7 +183,7 @@ dependency for the annotations themselves:
         <plugin>
             <groupId>io.github.ralfspoeth</groupId>
             <artifactId>log-weaver-maven-plugin</artifactId>
-            <version>1.0</version>
+            <version>1.1</version>
             <executions>
                 <execution>
                     <goals>
@@ -331,6 +390,10 @@ log-weaver/                              parent POM (packaging=pom)
 │   └── src/main/java/.../agent/
 │       └── LogWeaverAgent.java          premain + ClassFileTransformer
 │                                        → LogWeaverCore.transformClass
+├── log-weaver-testkit/
+│   └── src/main/java/.../testkit/
+│       └── RecordingLoggerFinder.java   System.LoggerFinder, registered as a
+│                                        service by this module's module-info
 └── log-weaver-bom/
     └── pom.xml                          dependencyManagement for all of the above
 ```
