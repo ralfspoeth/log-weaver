@@ -1,5 +1,7 @@
 package io.github.ralfspoeth.log.weaver.testkit;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.List;
 import java.util.Queue;
 import java.util.ResourceBundle;
@@ -71,7 +73,7 @@ public final class RecordingLoggerFinder extends System.LoggerFinder {
      *                throwable's own {@code getMessage()}
      * @param thrown  the throwable passed alongside, or {@code null}
      */
-    public record Entry(String logger, System.Logger.Level level, String message, Throwable thrown) {
+    public record Entry(String logger, System.Logger.Level level, String message, @Nullable Throwable thrown) {
 
         /** {@code true} when this entry carries a {@code thrown} of the given type. */
         public boolean threw(Class<? extends Throwable> type) {
@@ -140,7 +142,7 @@ public final class RecordingLoggerFinder extends System.LoggerFinder {
         }
 
         @Override
-        public void log(Level level, ResourceBundle bundle, String msg, Throwable thrown) {
+        public void log(Level level, ResourceBundle bundle, String msg, @Nullable Throwable thrown) {
             record(level, msg, thrown);
         }
 
@@ -149,7 +151,7 @@ public final class RecordingLoggerFinder extends System.LoggerFinder {
             record(level, format, null);
         }
 
-        private void record(Level level, String msg, Throwable thrown) {
+        private void record(Level level, String msg, @Nullable Throwable thrown) {
             if (isLoggable(level)) {
                 ENTRIES.add(new Entry(name, level, msg, thrown));
             }

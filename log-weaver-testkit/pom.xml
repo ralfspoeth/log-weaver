@@ -19,4 +19,12 @@
         the JDK — no logging backend and no assertion library, so it works with
         any test framework.
     </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>
